@@ -87,9 +87,19 @@ impl Capture {
             }
             return;
         }
-        let Some(cap) = snap.to_captured() else { return };
+        let Some(cap) = snap.to_captured() else {
+            // Concealed (password manager) or unsupported: pastes until the
+            // next copy are of something we didn't record.
+            self.current = None;
+            return;
+        };
         let mut ctx = platform::current_context(snap.source_url.as_deref());
         if is_own(&ctx) {
+            return;
+        }
+        if copypasta_core::secrets::is_password_manager(ctx.bundle_id.as_deref()) {
+            // Not recorded; and a paste now is of something we don't know.
+            self.current = None;
             return;
         }
         if cap.kind == copypasta_core::ClipKind::Image && looks_like_screenshot(&snap.types) {

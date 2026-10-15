@@ -171,10 +171,19 @@ fn migrates_a_v1_database() {
             CREATE VIRTUAL TABLE fts USING fts5(body, labels, tokenize='trigram');
             INSERT INTO clips(id, hash, kind, text, preview, first_seen, last_seen, copies) VALUES
               (1, 'h1', 'text', 'old clip from herdr', 'old clip from herdr', 1, 1, 1),
-              (2, 'h2', 'text', 'old clip from chrome', 'old clip from chrome', 2, 2, 1);
+              (2, 'h2', 'text', 'old clip from chrome', 'old clip from chrome', 2, 2, 1),
+              (4, 'h4', 'text', 'Xk2#mPq9!vRt', 'Xk2#mPq9!vRt', 4, 4, 1),
+              (5, 'h5', 'text', 'hunter22', 'hunter22', 5, 5, 1);
             INSERT INTO events(ts, kind, clip_id, ctx_key, label, ctx) VALUES
               (1, 'copy', 1, 'herdr:w1:p1', 'herdr claude', '{"herdr":{"pane_id":"w1:p1","workspace":"copypasta"}}'),
-              (2, 'copy', 2, 'web:x', 'example.com', '{"url":"https://example.com"}');
+              (2, 'copy', 2, 'web:x', 'example.com', '{"url":"https://example.com"}'),
+              (40, 'copy', 2, 'web:x', 'example.com', '{"url":"https://example.com"}'),
+              (5000, 'paste', 2, 'app:y', 'Y', '{"app_name":"Y"}'),
+              (5000, 'paste', 2, 'app:y', 'Y', '{"app_name":"Y"}'),
+              (9000, 'paste', 2, 'app:y', 'Y', '{"app_name":"Y"}'),
+              (4, 'copy', 4, 'app:z', 'Z', '{"app_name":"Z"}'),
+              (5, 'copy', 5, 'app:bw', 'Bitwarden', '{"app_name":"Bitwarden","bundle_id":"com.bitwarden.desktop"}');
+            INSERT INTO fts(rowid, body, labels) VALUES (4, 'Xk2#mPq9!vRt', ''), (5, 'hunter22', '');
             "#,
         )
         .unwrap();
@@ -186,7 +195,15 @@ fn migrates_a_v1_database() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 1);
+    assert_eq!(v, 2);
+    // Repeats collapsed (two instances / double writes), real repeats kept.
+    let c2 = s.clip(2).unwrap().unwrap();
+    assert_eq!((c2.copies, c2.pastes), (1, 2));
+    // Password-manager clips are gone; password-looking text is masked.
+    assert!(s.clip(5).unwrap().is_none());
+    let c4 = s.clip(4).unwrap().unwrap();
+    assert!(c4.secret && c4.text.is_none() && !c4.preview.contains("vRt"));
+    assert!(s.search("mPq9", 10).unwrap().is_empty());
     drop(s);
     // An older build wrote a herdr event without the workspace column.
     {

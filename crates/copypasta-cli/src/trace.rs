@@ -4,12 +4,20 @@
 use anyhow::Result;
 use copypasta_core::{context::truncate, graph, Clip, Store};
 
-/// Best clip for `query`: `#123` id, exact text, then the newest clip that
+/// Best clip for `query`: `#123` (or bare `123`) id, exact text, then the newest clip that
 /// contains (or is contained in) the text, then any search hit.
 pub fn find(store: &Store, query: &str) -> Result<(Option<Clip>, Vec<Clip>)> {
     let q = query.trim();
     if let Some(id) = q.strip_prefix('#').and_then(|n| n.parse::<i64>().ok()) {
         return Ok((store.clip(id)?, vec![]));
+    }
+    // A bare number is an id too, unless it is also something that was copied.
+    if let Ok(id) = q.parse::<i64>() {
+        if store.clip_by_text(q)?.is_none() {
+            if let Some(c) = store.clip(id)? {
+                return Ok((Some(c), vec![]));
+            }
+        }
     }
     if let Some(c) = store.clip_by_text(query)?.or(store.clip_by_text(q)?) {
         return Ok((Some(c), vec![]));
@@ -66,7 +74,7 @@ pub fn trace(store: &Store, query: &str) -> Result<String> {
     if !dst.is_empty() {
         out.push_str(&format!("pasted into: {}\n", dst.iter().map(|p| p.label.as_str()).collect::<Vec<_>>().join("; ")));
     }
-    out.push_str("\nLineage (time-ordered; [kind] marks links between different clips):\n");
+    out.push_str("\nRelated clips, oldest first (↳ says how each relates to an earlier one):\n");
     out.push_str(&graph::render_text(&g));
     if !others.is_empty() {
         out.push_str("\nOther possible matches:\n");

@@ -86,3 +86,49 @@ fn no_context_link_from_plain_shells_or_secrets() {
     let (c, _) = s.record_copy(&text("TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), &herdr(), 4_000).unwrap();
     assert!(s.links_touching(&[b, c]).unwrap().is_empty());
 }
+
+/// The notarytool session: a command copied from Claude, pasted into a shell
+/// twice (each event reported twice by a duplicate instance), the shell output
+/// copied back, then a fixed command. The graph should read as three clips.
+#[test]
+fn repeats_collapse_and_clips_relate_in_words() {
+    let dir = tempdir();
+    let mut s = Store::open_at(&dir).unwrap();
+    let claude = herdr();
+    let shell = Context {
+        herdr: Some(HerdrCtx {
+            pane_id: "w1:p2".into(),
+            workspace: Some("~".into()),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let broken = "xcrun notarytool store-credentials copypasta --apple-id a@b.c --team-id\n  ABCDEF1234";
+    let (a, _) = s.record_copy(&text(broken), &claude, 1_000).unwrap();
+    s.record_copy(&text(broken), &claude, 1_060).unwrap();
+    s.record_paste(a, &shell, 10_000).unwrap();
+    s.record_paste(a, &shell, 10_000).unwrap();
+    s.record_paste(a, &shell, 22_000).unwrap();
+    let out = format!("{broken}\nError: Missing value for '--team-id <team-id>'\nzsh: command not found: ABCDEF1234");
+    let (b, _) = s.record_copy(&text(&out), &shell, 26_000).unwrap();
+    s.record_paste(b, &claude, 37_000).unwrap();
+    let fixed = "xcrun notarytool store-credentials copypasta --apple-id a@b.c --team-id ABCDEF1234";
+    let (c, _) = s.record_copy(&text(fixed), &claude, 55_000).unwrap();
+
+    let ca = s.clip(a).unwrap().unwrap();
+    assert_eq!((ca.copies, ca.pastes), (1, 2), "repeats within a second are one action");
+
+    let g = graph::build(&s, c).unwrap();
+    let ids: Vec<i64> = g.clips.iter().map(|c| c.id).collect();
+    assert_eq!(ids, vec![a, b, c], "oldest first");
+    let first = &g.clips[0];
+    assert_eq!(first.steps.len(), 2, "copy, then pastes into one place collapsed: {:?}", first.steps);
+    assert_eq!(first.steps[1].count, 2);
+    assert_eq!(first.steps[1].title, "shell");
+    let rel: Vec<(i64, &str)> = g.relations.iter().map(|r| (r.child, r.text.as_str())).collect();
+    assert!(rel.contains(&(b, &*format!("includes #{a}"))), "{rel:?}");
+    assert!(rel.iter().any(|(ch, t)| *ch == c && t.contains(&format!("#{a}"))), "{rel:?}");
+    let txt = graph::render_text(&g);
+    assert!(txt.contains("◀ this clip") && txt.contains("×2") && txt.contains("↳ includes"), "{txt}");
+}

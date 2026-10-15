@@ -48,16 +48,17 @@ copypasta keeps that history and draws it as a DAG.
   - **Slack (web):** the channel or DM and the workspace.
   - **herdr:** the workspace, tab, pane, agent (claude, codex, …), agent session, cwd and pane title.
   - **Everything else:** the app and window title.
-- **Lineage DAG.** Nodes are moments in a window ("copied from…", "pasted into…"); edges follow the content:
-  - **pasted / re-copied:** the same clip moving between places.
-  - **content links:** a new clip *quotes*, *is an excerpt of*, or *is similar to* an older one, or is the *same image* (perceptual hash).
-  - **answer links:** you pasted into an agent pane or a web chat assistant, then copied something back out of it.
+- **Lineage.** The clip and every clip related to it, oldest first. Each card lists where that clip was copied from and pasted into (repeats in one place shown as ×N), and says how it relates to an earlier clip:
+  - *includes #5* or *is part of #5*: one contains the other's text.
+  - *is an edited version of #5*: near-identical text (also marked `edit of #5` in the list).
+  - *is the same image as #5*: perceptual hash match.
+  - *was copied out of claude after #5 was pasted there*: you pasted into an agent pane or a web chat assistant, then copied its answer.
 - **Images.** Region screenshots (⌃⇧⌘4), "Copy Image" from the browser, and image URLs, each with thumbnails.
 - **herdr tab.** `copypasta tui` gives you the same search and lineage in a terminal pane.
 - **MCP server.** `copypasta mcp` lets agents ask *"where did this text come from?"*
 - **Private by default.** Everything stays in a local SQLite file:
-  - Password-manager clips (concealed or transient pasteboard types) are ignored.
-  - Anything that looks like a credential is stored only as a hash plus a masked preview.
+  - Password-manager clips are ignored: concealed or transient pasteboard types, and anything copied from Bitwarden, 1Password, KeePassXC, Apple Passwords and similar apps.
+  - Anything that looks like a credential (API keys, tokens, or a lone generated-password-like string) is stored only as a hash plus a masked preview.
   - History is kept for **30 days or 2 GB**, whichever limit is hit first; pinned clips are kept.
 
 ## Install (macOS)

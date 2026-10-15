@@ -13,11 +13,6 @@ const $status = document.getElementById("status");
 const PAGE = 40;
 const PLACE_COLOR = { herdr: "var(--herdr)", slack: "var(--slack)", web: "var(--web)", app: "var(--app)", system: "var(--system)" };
 const KIND_BADGE = { text: "Aa", url: "↗", image: "▣", file: "📄" };
-const CONTENT_LINKS = new Set(["contains", "excerpt", "similar", "image_similar", "same_url"]);
-const LINK_TEXT = {
-  contains: "quotes", excerpt: "excerpt of", similar: "similar to", image_similar: "same image",
-  same_url: "from URL", via_context: "answer",
-};
 
 let groups = [];          // summaries from `groups`, in display order
 let allGroups = [];       // every group, for the "move to" menu
@@ -154,6 +149,7 @@ function clipRow(r, g, i) {
     const others = r.workspaces.filter((w) => w !== g.workspace);
     if (g.workspace && others.length) cross = `<span class="chip in" title="also pasted into these herdr workspaces">↔ ${esc(others.join(", "))}</span>`;
   }
+  if (r.edit_of) cross += `<span class="chip edit" title="near-identical to clip #${r.edit_of}, with changes">edit of #${r.edit_of}</span>`;
   const mono = /[{};=<>]|^\s*(\$|git |cargo |npm )/.test(r.preview) && r.kind === "text";
   return `<li class="clip${r.incoming ? " incoming" : ""}" data-i="${i}" data-id="${r.id}" draggable="true" role="option">
     ${badge}
@@ -318,8 +314,9 @@ async function showClip(r) {
       <span id="newgrp" hidden><input id="newname" placeholder="New group name" maxlength="80"><button data-act="create">Create</button></span>
       ${crossed}
     </div>
-    <div class="dagwrap"><h3>Copy / paste path</h3><div id="dag"></div>
-      <div class="legend"><span><i></i>pasted / re-copied</span><span><i class="c"></i>content link</span><span><i class="w"></i>copied out of an assistant after a paste</span></div>
+    <div class="dagwrap"><h3>Where it came from and went</h3>
+      <p class="hint">Oldest first. Each card is one clip; ↳ says how it relates to an earlier one. Click a card to open it.</p>
+      <div id="dag"></div>
     </div>`;
   document.getElementById("grp").addEventListener("change", onGroupChange);
   if (graph) renderDag(document.getElementById("dag"), graph);

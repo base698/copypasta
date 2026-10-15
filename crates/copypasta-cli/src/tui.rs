@@ -274,6 +274,9 @@ fn draw(f: &mut Frame, app: &mut App) {
                 let tag = if r.incoming { format!("⇢{} ", truncate(&g.name, 14)) } else { format!("[{}] ", truncate(&g.name, 14)) };
                 places.push(Span::styled(tag, Style::default().fg(Color::Cyan)));
             }
+            if let Some(id) = r.edit_of {
+                places.push(Span::styled(format!("edit of #{id} "), Style::default().fg(Color::Yellow)));
+            }
             if let Some(p) = r.sources.first() {
                 places.push(Span::styled(format!("{} ", truncate(&p.label, 28)), Style::default().fg(place_color(&p.kind))));
             }

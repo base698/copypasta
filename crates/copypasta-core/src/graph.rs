@@ -1,12 +1,16 @@
 //! The lineage DAG for one clip. Nodes are copy/paste events (a window at a
 //! moment); edges follow content from where it was copied to where it was
 //! pasted, and on to whatever was copied back out of those places.
+//!
+//! For people, the same graph is also summarized per clip: each related clip
+//! with its copy/paste steps (repeats in one place collapsed), and plain
+//! relations between clips ("#6 includes #5").
 
 use crate::context::{self, Context};
 use crate::db::Store;
 use crate::model::*;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 const MAX_CLIPS: usize = 30;
 const MAX_DEPTH: usize = 3;
@@ -15,9 +19,12 @@ const MAX_EVENTS_PER_CLIP: usize = 25;
 #[derive(Debug, Clone, Serialize)]
 pub struct Graph {
     pub focus: i64,
+    /// Related clips, oldest first.
     pub clips: Vec<GraphClip>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    /// How clips relate, child described relative to parent.
+    pub relations: Vec<Relation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,6 +33,34 @@ pub struct GraphClip {
     pub kind: ClipKind,
     pub preview: String,
     pub secret: bool,
+    pub first_seen: i64,
+    pub steps: Vec<Step>,
+}
+
+/// One or more consecutive copies (or pastes) of a clip in the same place.
+#[derive(Debug, Clone, Serialize)]
+pub struct Step {
+    pub kind: EventKind,
+    /// herdr | slack | web | app | system
+    pub place: String,
+    /// Short name of the place: "claude", "shell · build", "Slack #eng".
+    pub title: String,
+    /// Where exactly: cwd and pane title, URL, window title.
+    pub detail: Option<String>,
+    pub workspace: Option<String>,
+    pub ts: i64,
+    pub last_ts: i64,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Relation {
+    pub parent: i64,
+    pub child: i64,
+    pub kind: String,
+    /// Phrase that reads after the child's id: "includes #5".
+    pub text: String,
+    pub weak: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +89,68 @@ pub struct Edge {
 
 fn node_id(e: &Event) -> String {
     format!("e{}", e.id)
+}
+
+/// Short place name for people; the herdr workspace is shown separately.
+pub fn place_title(ctx: &Context, label: &str) -> String {
+    if let Some(h) = &ctx.herdr {
+        let who = h.agent.clone().or_else(|| h.pane_label.clone()).unwrap_or_else(|| "shell".into());
+        return match h.tab.as_ref().filter(|t| !t.chars().all(|c| c.is_ascii_digit())) {
+            Some(t) => format!("{who} · {t}"),
+            None => who,
+        };
+    }
+    label.to_string()
+}
+
+pub fn place_detail(ctx: &Context) -> Option<String> {
+    if let Some(h) = &ctx.herdr {
+        let parts: Vec<String> = [h.cwd.as_deref().map(context::tilde), h.title.as_deref().map(|t| context::truncate(t, 50))]
+            .into_iter()
+            .flatten()
+            .collect();
+        return (!parts.is_empty()).then(|| parts.join(" · "));
+    }
+    detail(ctx)
+}
+
+fn relation_text(kind: &str, parent: i64, place: &str) -> String {
+    match kind {
+        "contains" => format!("includes #{parent}"),
+        "excerpt" => format!("is part of #{parent}"),
+        "similar" => format!("is an edited version of #{parent}"),
+        "image_similar" => format!("is the same image as #{parent}"),
+        "same_url" => format!("is the image at the URL in #{parent}"),
+        "via_context" => format!("was copied out of {place} after #{parent} was pasted there"),
+        k => format!("{k} #{parent}"),
+    }
+}
+
+fn steps_of(events: &[Event]) -> Vec<Step> {
+    let mut out: Vec<Step> = Vec::new();
+    let mut last_key: Option<(EventKind, &str)> = None;
+    for e in events {
+        if last_key == Some((e.kind, e.ctx_key.as_str())) {
+            let s = out.last_mut().expect("step for last key");
+            s.count += 1;
+            s.last_ts = e.ts;
+            // Latest whereabouts (a shell may have changed directory).
+            s.detail = place_detail(&e.ctx).or(s.detail.take());
+            continue;
+        }
+        last_key = Some((e.kind, e.ctx_key.as_str()));
+        out.push(Step {
+            kind: e.kind,
+            place: context::kind(&e.ctx).into(),
+            title: place_title(&e.ctx, &e.label),
+            detail: place_detail(&e.ctx),
+            workspace: e.ctx.herdr.as_ref().and_then(|h| h.workspace.clone()),
+            ts: e.ts,
+            last_ts: e.ts,
+            count: 1,
+        });
+    }
+    out
 }
 
 fn detail(ctx: &Context) -> Option<String> {
@@ -110,10 +207,10 @@ pub fn build(store: &Store, focus: i64) -> anyhow::Result<Graph> {
             ev = ev.split_off(ev.len() - (MAX_EVENTS_PER_CLIP - 1));
             ev.insert(0, first);
         }
-        clips.push(GraphClip { id, kind: c.kind, preview: c.preview, secret: c.secret });
+        clips.push(GraphClip { id, kind: c.kind, preview: c.preview, secret: c.secret, first_seen: c.first_seen, steps: steps_of(&ev) });
         events.insert(id, ev);
     }
-    clips.sort_by_key(|c| c.id);
+    clips.sort_by_key(|c| (c.first_seen, c.id));
 
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -157,8 +254,21 @@ pub fn build(store: &Store, focus: i64) -> anyhow::Result<Graph> {
     // 3. Clip links become edges between specific events: from the parent's
     //    paste into the place the child was copied from, else the parent's
     //    latest event before the child's first copy.
+    let mut relations = Vec::new();
     for (parent, child, kind, _) in &links {
         let (Some(pev), Some(cev)) = (events.get(parent), events.get(child)) else { continue };
+        let place = cev
+            .iter()
+            .find(|e| e.kind == EventKind::Copy)
+            .map(|e| place_title(&e.ctx, &e.label))
+            .unwrap_or_else(|| "there".into());
+        relations.push(Relation {
+            parent: *parent,
+            child: *child,
+            kind: kind.clone(),
+            text: relation_text(kind, *parent, &place),
+            weak: kind == "via_context" || kind == "similar",
+        });
         let Some(first_copy) = cev.iter().find(|e| e.kind == EventKind::Copy).or(cev.first()) else { continue };
         let before: Vec<&Event> = pev.iter().filter(|e| e.ts <= first_copy.ts).collect();
         let src = before
@@ -179,75 +289,36 @@ pub fn build(store: &Store, focus: i64) -> anyhow::Result<Graph> {
     }
 
     nodes.sort_by_key(|n| (n.ts, n.event_id));
-    Ok(Graph { focus, clips, nodes, edges })
+    relations.sort_by_key(|r| (r.child, r.parent));
+    Ok(Graph { focus, clips, nodes, edges, relations })
 }
 
-/// Plain-text rendering for the TUI and MCP: a time-ordered tree.
+/// Plain-text rendering for the TUI and MCP: related clips oldest first,
+/// each with where it was copied and pasted, and how it relates to the others.
 pub fn render_text(g: &Graph) -> String {
-    let by_id: HashMap<&str, &Node> = g.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let clip_preview: HashMap<i64, &GraphClip> = g.clips.iter().map(|c| (c.id, c)).collect();
-    let mut children: HashMap<&str, Vec<&Edge>> = HashMap::new();
-    let mut has_parent = HashSet::new();
-    for e in &g.edges {
-        children.entry(e.from.as_str()).or_default().push(e);
-        has_parent.insert(e.to.as_str());
-    }
-    for v in children.values_mut() {
-        v.sort_by_key(|e| by_id.get(e.to.as_str()).map(|n| n.ts).unwrap_or(0));
-    }
     let mut out = String::new();
-    let mut printed = HashSet::new();
-    let mut last_clip = None;
-    for root in g.nodes.iter().filter(|n| !has_parent.contains(n.id.as_str())) {
-        walk(root, None, 0, &by_id, &children, &clip_preview, &mut printed, &mut last_clip, &mut out);
-    }
-    out
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk<'a>(
-    n: &'a Node,
-    via: Option<&Edge>,
-    depth: usize,
-    by_id: &HashMap<&str, &'a Node>,
-    children: &HashMap<&str, Vec<&'a Edge>>,
-    clips: &HashMap<i64, &GraphClip>,
-    printed: &mut HashSet<&'a str>,
-    last_clip: &mut Option<i64>,
-    out: &mut String,
-) {
-    let indent = "  ".repeat(depth);
-    let verb = match n.kind {
-        EventKind::Copy => "copied from",
-        EventKind::Paste => "pasted into",
-    };
-    let link = match via.map(|e| e.kind.as_str()) {
-        None | Some("paste") | Some("recopy") => String::new(),
-        Some(k) => format!("[{k}] "),
-    };
-    if *last_clip != Some(n.clip_id) {
-        if let Some(c) = clips.get(&n.clip_id) {
-            out.push_str(&format!("{indent}┌ clip #{} {}: {}\n", c.id, c.kind.as_str(), context::truncate(&c.preview, 80)));
+    for c in &g.clips {
+        let me = if c.id == g.focus { "  ◀ this clip" } else { "" };
+        out.push_str(&format!("#{} {}: {}{me}\n", c.id, c.kind.as_str(), context::truncate(&c.preview, 80)));
+        for r in g.relations.iter().filter(|r| r.child == c.id) {
+            out.push_str(&format!("   ↳ {}{}\n", r.text, if r.weak { " (probably)" } else { "" }));
         }
-        *last_clip = Some(n.clip_id);
-    }
-    let arrow = if depth == 0 { "•" } else { "→" };
-    if !printed.insert(n.id.as_str()) {
-        out.push_str(&format!("{indent}{arrow} {link}{verb} {} (see above)\n", n.label));
-        return;
-    }
-    out.push_str(&format!("{indent}{arrow} {link}{verb} {}  [{}]\n", n.label, fmt_ts(n.ts)));
-    if let Some(d) = &n.detail {
-        out.push_str(&format!("{indent}    {d}\n"));
-    }
-    if let Some(kids) = children.get(n.id.as_str()) {
-        for e in kids {
-            if let Some(child) = by_id.get(e.to.as_str()) {
-                walk(child, Some(e), depth + 1, by_id, children, clips, printed, last_clip, out);
-                *last_clip = Some(n.clip_id);
+        for s in &c.steps {
+            let verb = match s.kind {
+                EventKind::Copy => "copied from",
+                EventKind::Paste => "pasted into",
+            };
+            let times = if s.count > 1 { format!(" ×{}", s.count) } else { String::new() };
+            let place = if s.place == "herdr" { format!("herdr {}", s.title) } else { s.title.clone() };
+            let ws = s.workspace.as_deref().map(|w| format!(" (workspace {w})")).unwrap_or_default();
+            out.push_str(&format!("   {}  {verb} {place}{ws}{times}\n", fmt_ts(s.ts)));
+            if let Some(d) = &s.detail {
+                out.push_str(&format!("                     {d}\n"));
             }
         }
+        out.push('\n');
     }
+    out
 }
 
 /// Local "YYYY-MM-DD HH:MM" without pulling in a date crate.

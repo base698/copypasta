@@ -68,7 +68,24 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS clips_group ON clips(group_id, last_seen);
     CREATE INDEX IF NOT EXISTS events_ws ON events(workspace, kind, clip_id);
     "#,
+    // 2: drop repeat events (same clip, kind and place within REPEAT_MS of an
+    // earlier one: two app instances, or apps that write the clipboard
+    // several times) and recount. Secrets are scrubbed after this runs.
+    r#"
+    DELETE FROM events WHERE id IN (
+      SELECT b.id FROM events a JOIN events b
+        ON b.clip_id = a.clip_id AND b.kind = a.kind AND b.ctx_key = a.ctx_key
+       AND b.id != a.id AND b.ts >= a.ts AND b.ts - a.ts <= 1000
+       AND (b.ts > a.ts OR b.id > a.id));
+    UPDATE clips SET
+      copies = (SELECT COUNT(*) FROM events WHERE clip_id = clips.id AND kind = 'copy'),
+      pastes = (SELECT COUNT(*) FROM events WHERE clip_id = clips.id AND kind = 'paste');
+    "#,
 ];
+
+/// A copy or paste of the same clip in the same place this soon after the
+/// last one is the same action reported twice.
+pub const REPEAT_MS: i64 = 1000;
 
 pub struct Store {
     pub(crate) conn: Connection,
@@ -131,7 +148,7 @@ impl Store {
             .with_context(|| format!("creating {}", dir.display()))?;
         let conn = Connection::open(dir.join("copypasta.db"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;")?;
         conn.execute_batch(SCHEMA)?;
         let mut store = Store { conn, blob_dir: dir.join("blobs") };
         store.migrate()?;
@@ -145,8 +162,12 @@ impl Store {
             tx.execute_batch(sql)?;
             tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
             tx.commit()?;
-            if i == 0 {
-                self.regroup_all()?;
+            match i {
+                0 => self.regroup_all()?,
+                1 => {
+                    self.scrub_secrets()?;
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -163,6 +184,9 @@ impl Store {
     /// Store a copy event. Returns (clip_id, event_id).
     pub fn record_copy(&mut self, cap: &Captured, ctx: &Context, ts: i64) -> Result<(i64, i64)> {
         let clip_id = self.upsert_clip(cap, ts)?;
+        if let Some(prev) = self.repeat_of(EventKind::Copy, clip_id, ctx, ts)? {
+            return Ok((clip_id, prev));
+        }
         self.conn.execute(
             "UPDATE clips SET copies = copies + 1, last_seen = ?2 WHERE id = ?1",
             params![clip_id, ts],
@@ -174,6 +198,9 @@ impl Store {
     }
 
     pub fn record_paste(&mut self, clip_id: i64, ctx: &Context, ts: i64) -> Result<i64> {
+        if let Some(prev) = self.repeat_of(EventKind::Paste, clip_id, ctx, ts)? {
+            return Ok(prev);
+        }
         self.conn.execute(
             "UPDATE clips SET pastes = pastes + 1, last_seen = ?2 WHERE id = ?1",
             params![clip_id, ts],
@@ -186,6 +213,76 @@ impl Store {
         }
         self.auto_group(clip_id)?;
         Ok(id)
+    }
+
+    /// The event this one would merely repeat (see `REPEAT_MS`).
+    fn repeat_of(&self, kind: EventKind, clip_id: i64, ctx: &Context, ts: i64) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM events WHERE clip_id = ?1 AND kind = ?2 AND ctx_key = ?3 AND ts BETWEEN ?4 AND ?5
+                 ORDER BY ts DESC LIMIT 1",
+                params![clip_id, kind.as_str(), ctx.key(), ts - REPEAT_MS, ts],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Remove what older builds recorded but shouldn't have: clips copied from
+    /// password managers are deleted, and clips that look like credentials
+    /// under the current rules are masked. Returns how many clips changed.
+    pub fn scrub_secrets(&mut self) -> Result<usize> {
+        let mut changed = 0;
+        let pm: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT clip_id FROM events WHERE kind = 'copy' AND json_extract(ctx, '$.bundle_id') IS NOT NULL",
+            )?;
+            let ids: Vec<i64> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let mut out = Vec::new();
+            for id in ids {
+                let bundles: Vec<Option<String>> = {
+                    let mut s = self.conn.prepare_cached(
+                        "SELECT json_extract(ctx, '$.bundle_id') FROM events WHERE clip_id = ?1 AND kind = 'copy'",
+                    )?;
+                    let v = s.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                    v
+                };
+                if bundles.iter().any(|b| secrets::is_password_manager(b.as_deref())) {
+                    out.push(id);
+                }
+            }
+            out
+        };
+        for id in pm {
+            self.delete_clip(id)?;
+            changed += 1;
+        }
+        let plain: Vec<(i64, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, text FROM clips WHERE secret = 0 AND kind != 'image' AND text IS NOT NULL")?;
+            let v = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            v
+        };
+        for (id, text) in plain {
+            if secrets::looks_secret(&text) {
+                self.conn.execute(
+                    "UPDATE clips SET secret = 1, text = NULL, preview = ?2 WHERE id = ?1",
+                    params![id, secrets::mask(&text)],
+                )?;
+                self.conn.execute("DELETE FROM links WHERE parent = ?1 OR child = ?1", [id])?;
+                self.refresh_fts(id)?;
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            // Rewrite the file so no freed page or old index segment still
+            // holds the plain text.
+            self.conn.execute_batch(
+                "INSERT INTO fts(fts) VALUES('optimize'); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+            )?;
+        }
+        Ok(changed)
     }
 
     fn insert_event(&mut self, kind: EventKind, clip_id: i64, ctx: &Context, ts: i64) -> Result<i64> {
@@ -414,7 +511,12 @@ impl Store {
                         }
                     }
                 }
-                Ok(ClipRow { clip, sources, destinations, group, incoming: false, workspaces })
+                let edit_of = self
+                    .conn
+                    .prepare_cached("SELECT parent FROM links WHERE child = ?1 AND kind = 'similar' ORDER BY score DESC LIMIT 1")?
+                    .query_row([clip.id], |r| r.get(0))
+                    .optional()?;
+                Ok(ClipRow { clip, sources, destinations, group, incoming: false, workspaces, edit_of })
             })
             .collect()
     }

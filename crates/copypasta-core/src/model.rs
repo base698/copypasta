@@ -75,6 +75,8 @@ pub struct ClipRow {
     pub incoming: bool,
     /// herdr workspaces this clip was copied from or pasted into.
     pub workspaces: Vec<String>,
+    /// An earlier clip this one is an edited version of (near-identical text).
+    pub edit_of: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
