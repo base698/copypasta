@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Copypasta",
+  "version": "0.1.0",
+  "identifier": "dev.base698.copypasta",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Copypasta",
+        "width": 1180,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 420,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "resizable": true,
+        "center": true,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.png"] }
+}

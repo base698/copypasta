@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Copypasta</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="panel">
+    <header>
+      <div class="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="q" type="text" placeholder="Search clips, Slack channels, URLs, herdr panes…" autocomplete="off" spellcheck="false" autofocus />
+      </div>
+      <div id="status" class="status"></div>
+    </header>
+    <main>
+      <ul id="list" class="list" role="listbox"></ul>
+      <section id="detail" class="detail">
+        <div class="empty">Nothing copied yet. Copy something and it shows up here.</div>
+      </section>
+    </main>
+    <footer>
+      <span><kbd>↑</kbd><kbd>↓</kbd> select</span>
+      <span><kbd>⏎</kbd> copy</span>
+      <span><kbd>⌘⏎</kbd> paste</span>
+      <span><kbd>⌘P</kbd> pin</span>
+      <span><kbd>⌘⌫</kbd> delete</span>
+      <span><kbd>esc</kbd> close</span>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

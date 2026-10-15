@@ -1,0 +1,23 @@
+[package]
+name = "copypasta-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+copypasta-core = { version = "0.1.0", path = "../copypasta-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tauri = "2"
+tauri-plugin-global-shortcut = "2"
+
+[build-dependencies]
+tauri-build = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10.1"
+core-foundation-sys = "0.8.7"
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
