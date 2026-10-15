@@ -61,11 +61,23 @@ copypasta keeps that history and draws it as a DAG.
 
 ## Install (macOS)
 
-Download the latest `Copypasta-macos-arm64.zip` from [Releases](https://github.com/base698/copypasta/releases), unzip it into `~/Applications`, and open it once.
+One line, Apple Silicon:
 
-> The release is signed with an Apple **Development** certificate, not notarized. On first launch, right-click → **Open**, or run `xattr -dr com.apple.quarantine ~/Applications/Copypasta.app`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/base698/copypasta/main/install.sh | sh
+```
 
-Or build it yourself (Rust 1.80+):
+The installer:
+
+- downloads the latest release and checks it against `SHA256SUMS` and its code signature;
+- installs `~/Applications/Copypasta.app` and `~/.local/bin/copypasta`;
+- starts the app at login.
+
+Then press **⌃⌘V**.
+
+> **Why not just download the zip?** Releases are currently signed with an Apple *Development* certificate, not a notarized Developer ID. macOS 15+ refuses to open such apps once a browser has quarantined them, and the old right-click → Open bypass is gone. `curl` doesn't add quarantine, which is why the installer works. Notarized builds are coming (see `scripts/release-macos.sh`). If you already downloaded the zip: `xattr -dr com.apple.quarantine ~/Applications/Copypasta.app`.
+
+Or build from source (Rust 1.80+):
 
 ```sh
 git clone https://github.com/base698/copypasta && cd copypasta
@@ -158,7 +170,7 @@ crates/
 ## Roadmap
 
 - **Linux / Omarchy (Hyprland).** Watch the clipboard with `wl-paste --watch`, get the window from `hyprctl activewindow`, and wrap Omarchy's Super+V binding to log pastes, so no key tap is needed. Optionally, an [Elephant](https://github.com/abenz1267/elephant) provider so the history also shows up in Walker.
-- Notarized Developer ID builds.
+- Notarized Developer ID builds (`scripts/release-macos.sh` is ready; needs the certificate).
 - Menu-paste detection on macOS (lazy pasteboard providers).
 
 ## License
