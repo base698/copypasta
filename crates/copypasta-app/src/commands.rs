@@ -1,6 +1,5 @@
 use crate::AppState;
-use base64::Engine;
-use copypasta_core::{graph, imaging, ClipKind, ClipRow};
+use copypasta_core::ClipKind;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use tauri::State;
@@ -11,27 +10,11 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// Every store operation the panel needs (see copypasta_core::api).
 #[tauri::command]
-pub fn search(state: State<AppState>, query: String, limit: Option<usize>) -> Res<Vec<ClipRow>> {
-    state.store.lock().unwrap().search(&query, limit.unwrap_or(200)).map_err(err)
-}
-
-#[tauri::command]
-pub fn graph(state: State<AppState>, id: i64) -> Res<graph::Graph> {
-    graph::build(&state.store.lock().unwrap(), id).map_err(err)
-}
-
-/// PNG as a data URL; `max` limits the long side for thumbnails.
-#[tauri::command]
-pub fn image(state: State<AppState>, id: i64, max: Option<u32>) -> Res<Option<String>> {
-    let store = state.store.lock().unwrap();
-    let Some(clip) = store.clip(id).map_err(err)? else { return Ok(None) };
-    let Some(png) = store.read_blob(&clip) else { return Ok(None) };
-    let png = match max {
-        Some(m) => imaging::thumbnail(&png, m).map_err(err)?,
-        None => png,
-    };
-    Ok(Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))))
+pub fn api(state: State<AppState>, cmd: String, args: Option<serde_json::Value>) -> Res<serde_json::Value> {
+    let mut store = state.store.lock().unwrap();
+    copypasta_core::api::call(&mut store, &cmd, &args.unwrap_or(serde_json::Value::Null)).map_err(err)
 }
 
 /// Put a clip back on the clipboard; with `paste`, also paste it into the
@@ -68,16 +51,6 @@ pub fn restore(app: tauri::AppHandle, state: State<AppState>, id: i64, paste: bo
         });
     }
     Ok(())
-}
-
-#[tauri::command]
-pub fn delete(state: State<AppState>, id: i64) -> Res<()> {
-    state.store.lock().unwrap().delete_clip(id).map_err(err)
-}
-
-#[tauri::command]
-pub fn pin(state: State<AppState>, id: i64, pinned: bool) -> Res<()> {
-    state.store.lock().unwrap().set_pinned(id, pinned).map_err(err)
 }
 
 #[derive(Serialize)]

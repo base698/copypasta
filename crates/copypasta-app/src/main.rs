@@ -92,12 +92,8 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::search,
-            commands::graph,
-            commands::image,
+            commands::api,
             commands::restore,
-            commands::delete,
-            commands::pin,
             commands::status,
             commands::hide,
             commands::request_permissions,

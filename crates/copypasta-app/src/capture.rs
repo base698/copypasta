@@ -32,7 +32,12 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new(store: Store, shared: Arc<Shared>, on_change: Box<dyn Fn() + Send>) -> Self {
+    pub fn new(mut store: Store, shared: Arc<Shared>, on_change: Box<dyn Fn() + Send>) -> Self {
+        match store.repair() {
+            Ok(n) if n > 0 => eprintln!("copypasta: repaired workspace on {n} events"),
+            Err(e) => eprintln!("copypasta: repair failed: {e:#}"),
+            _ => {}
+        }
         let mut c = Capture { store, shared, last_change: platform::change_count(), current: None, on_change };
         // Whatever is on the clipboard at startup: remember it without a copy event.
         if let Some(cap) = platform::read().to_captured() {

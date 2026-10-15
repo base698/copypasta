@@ -51,6 +51,10 @@ if [ -z "${COPYPASTA_NO_AGENT:-}" ]; then
     launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
     sleep 0.1
   done
+  # bootout doesn't always stop the app; don't leave an old copy running.
+  pkill -f "$APP/Contents/MacOS/Copypasta" 2>/dev/null || true
+  sleep 1
+  pkill -9 -f "$APP/Contents/MacOS/Copypasta" 2>/dev/null || true
 fi
 
 say "installing $APP"

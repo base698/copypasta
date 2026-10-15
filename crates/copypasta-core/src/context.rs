@@ -36,8 +36,11 @@ pub struct SlackCtx {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct HerdrCtx {
     pub pane_id: String,
+    /// Workspace label (what groups are keyed on).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tab: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

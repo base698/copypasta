@@ -44,6 +44,7 @@ pub fn trace(store: &Store, query: &str) -> Result<String> {
     };
     let g = graph::build(store, clip.id)?;
     let (src, dst) = store.places(clip.id)?;
+    let row = store.rows(vec![clip.clone()])?.pop();
     let mut out = format!(
         "Clip #{} ({}): {}\nfirst copied {} · copied {}× · pasted {}×\n",
         clip.id,
@@ -53,6 +54,12 @@ pub fn trace(store: &Store, query: &str) -> Result<String> {
         clip.copies,
         clip.pastes
     );
+    if let Some(g) = row.as_ref().and_then(|r| r.group.as_ref()) {
+        out.push_str(&format!("group: {}{}\n", g.name, if g.manual { " (set by user)" } else { "" }));
+    }
+    if let Some(ws) = row.as_ref().map(|r| &r.workspaces).filter(|w| w.len() > 1) {
+        out.push_str(&format!("crossed herdr workspaces: {}\n", ws.join(", ")));
+    }
     if !src.is_empty() {
         out.push_str(&format!("copied from: {}\n", src.iter().map(|p| p.label.as_str()).collect::<Vec<_>>().join("; ")));
     }

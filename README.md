@@ -9,7 +9,7 @@
 Every copy is recorded with its source window. Every ⌘V is recorded with its destination.
 Click any clip to see the path it took between your browser tabs, Slack channels and [herdr](https://herdr.dev) agent panes, drawn as a graph.
 
-<img src="docs/panel.jpg" width="900" alt="The copypasta panel: a searchable clip list on the left, and on the right the copy/paste path of a code fix that went from a log pane, into Codex, out to nvim and Slack, and finally into a GitHub PR." />
+<img src="docs/panel.jpg" width="900" alt="The copypasta panel: clips grouped by herdr workspace on the left, with an answer from the copypasta workspace shown as incoming in the api workspace; on the right, its path from a docs.rs page into Claude, then out to Slack and to Codex in another workspace." />
 
 </div>
 
@@ -41,6 +41,7 @@ copypasta keeps that history and draws it as a DAG.
 ## Features
 
 - **⌃⌘V panel.** A floating window with the search box already focused: type to filter, `↑↓` to move, `⏎` to copy, `⌘⏎` to paste into the window you came from. The shortcut mirrors Omarchy's Super+Ctrl+V.
+- **Groups per herdr workspace.** Clips collapse under the workspace they were first copied in. Clips copied outside herdr join the first workspace you paste them into. Make your own groups, rename any group, and drag clips between them. [More below.](#groups)
 - **Full-text search** over clip text *and* places. `slack eng`, `docs.rs`, `herdr claude` and `limiter.rs` all work, including substring matches (trigram index).
 - **Rich context** for every copy and paste:
   - **Browsers:** the tab URL and title (Chrome, Brave, Edge, Arc, Safari; Firefox gets the window title only).
@@ -107,8 +108,24 @@ Copying is recorded without any of them; you just get less context.
 | `↑` `↓` / click | select; the right side shows the clip and its path |
 | `⏎` | put the clip back on the clipboard |
 | `⌘⏎` | …and paste it into the previous window |
+| `←` `→` | collapse / expand a group (or jump from a clip to its group) |
+| `⌘G` | move the selected clip to another group |
 | `⌘P` / `⌘⌫` | pin / delete |
 | click a dashed node | jump to that related clip |
+
+### Groups
+
+Every herdr workspace gets a group automatically, keyed by the workspace name. The list shows collapsible groups, most recently active first, loading 40 clips at a time as you scroll.
+
+| Situation | Where the clip goes |
+| --- | --- |
+| Copied in a herdr pane | That pane's workspace group |
+| Copied in a browser, Slack, … | **Ungrouped**, until it's first pasted into a herdr workspace; then it joins that workspace |
+| Copied in workspace **A**, pasted into workspace **B** | Stays in **A**. It's also listed in **B** as *incoming* (`⇢ from A`), and **B**'s header counts it (`+1 in`). The DAG shows it crossing over. |
+| Copied out of **B** after that paste (e.g. Claude's answer) | **B**, linked back to the clip from **A** in the lineage |
+| You moved it (menu, ⌘G, or drag onto a group header) | Wherever you put it. Automatic grouping never overrides a manual choice; pick *Automatic* in the menu to go back. |
+
+Select a group header to rename or delete it. Deleting a group keeps its clips, which become ungrouped. To filter by group, search `g:<name>`; `g:none` shows only ungrouped clips.
 
 ### In herdr
 
@@ -117,7 +134,7 @@ herdr tab create --label clips   # then, in the new pane:
 copypasta tui
 ```
 
-Type to search, `↑↓` to select, `⏎` to copy, `^D`/`^E` to scroll the lineage, `esc` to clear or quit.
+Type to search (`g:name` works here too), `tab`/`shift-tab` to cycle groups, `↑↓` to select (more clips load as you go), `⏎` to copy, `^D`/`^E` to scroll the lineage, `esc` to clear or quit.
 
 ### For agents (MCP)
 
@@ -128,15 +145,19 @@ claude mcp add -s user copypasta -- ~/.local/bin/copypasta mcp
 | Tool | |
 | --- | --- |
 | `clipboard_trace` | `{text}` or `{clip_id}` → where it was copied from, where it was pasted, and related clips |
-| `clipboard_search` | `{query, limit}` → matching clips with sources and destinations |
+| `clipboard_search` | `{query, limit, offset}` → matching clips with group, sources and destinations (`g:name` filters) |
+| `clipboard_groups` | `{query}` → groups (herdr workspaces and your own) with counts and incoming pastes |
 
 ### CLI
 
 ```sh
 copypasta search slack eng        # recent clips matching every term
+copypasta groups                  # groups with clip and incoming counts
+copypasta search g:api limiter    # within one group
 copypasta trace "ok_or(LimitError"
 pbpaste | copypasta trace -       # where did what's on my clipboard come from?
 copypasta stats | gc | demo       # demo seeds a sample history into $COPYPASTA_HOME
+copypasta api groups '{"query":""}'   # the panel's JSON API (search, groups, move, rename_group, …)
 ```
 
 ## How it works
@@ -156,13 +177,15 @@ flowchart LR
 ```
 
 - **Clips** are content-addressed: the SHA-256 of the text, or of the PNG for images.
-- **Events** are copies and pastes, each with a JSON context and a stable *place key*, e.g. `herdr:w1:p4`, `slack:Acme/C02ENG` or `web:https://…`.
+- **Events** are copies and pastes, each with a JSON context, a stable *place key* (e.g. `herdr:w1:p4`, `slack:Acme/C02ENG` or `web:https://…`) and the herdr workspace, if any.
+- **Groups**: a clip gets one group, automatic or manual. "Incoming" isn't stored; it's computed from paste events into a workspace.
+- **Upgrades**: schema changes run as numbered migrations, and 0.1 databases are upgraded and regrouped on first launch.
 - **Links** always point from an older clip to a newer one, so the graph is acyclic by construction. *Content links* compare a new clip with recent ones: containment, word 3-gram Jaccard ≥ 0.5, or image dHash distance ≤ 5. *Answer links* connect the last paste into an assistant with a copy out of that same place within 30 minutes.
 - **herdr context** comes from `herdr api snapshot`, which takes about 8 ms, whenever a terminal is frontmost and a herdr client is attached.
 
 ```
 crates/
-  copypasta-core   storage, search, lineage, graph, macOS pasteboard
+  copypasta-core   storage, search, groups, lineage, graph, JSON api, macOS pasteboard
   copypasta-app    Tauri panel + capture daemon (pasteboard poll, key tap, AX, AppleScript)
   copypasta-cli    `copypasta` — tui, mcp, search, trace
 ```

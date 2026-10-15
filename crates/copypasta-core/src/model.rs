@@ -69,6 +69,58 @@ pub struct ClipRow {
     pub clip: Clip,
     pub sources: Vec<Place>,
     pub destinations: Vec<Place>,
+    pub group: Option<GroupRef>,
+    /// Listed in a group it doesn't belong to because it was pasted into
+    /// that group's herdr workspace.
+    pub incoming: bool,
+    /// herdr workspaces this clip was copied from or pasted into.
+    pub workspaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct GroupRef {
+    pub id: i64,
+    pub name: String,
+    pub manual: bool,
+}
+
+/// A group: a herdr workspace (automatic) or one the user made.
+#[derive(Debug, Clone, Serialize)]
+pub struct Group {
+    pub id: i64,
+    pub name: String,
+    /// The herdr workspace label for automatic groups.
+    pub workspace: Option<String>,
+    pub created: i64,
+}
+
+/// One entry of the grouped list; `id` None is "Ungrouped".
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupSummary {
+    pub id: Option<i64>,
+    pub name: String,
+    pub workspace: Option<String>,
+    /// Clips that belong to the group (matching the search).
+    pub count: i64,
+    /// Clips from other groups pasted into this workspace.
+    pub incoming: i64,
+    pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum GroupSel {
+    #[default]
+    All,
+    Ungrouped,
+    Id(i64),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Query {
+    pub text: String,
+    pub group: GroupSel,
+    pub offset: usize,
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -77,6 +129,7 @@ pub struct Place {
     pub label: String,
     pub kind: String,
     pub last_ts: i64,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

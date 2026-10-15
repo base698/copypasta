@@ -1,11 +1,11 @@
 [package]
 name = "copypasta"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0.104"
-copypasta-core = { version = "0.1.0", path = "../copypasta-core" }
+copypasta-core = { version = "0.2.0", path = "../copypasta-core" }
 crossterm = "0.29.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 ratatui = "0.30.2"

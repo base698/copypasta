@@ -51,6 +51,25 @@ CREATE INDEX IF NOT EXISTS links_child ON links(child);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(body, labels, tokenize='trigram');
 "#;
 
+/// Schema changes after 0.1, applied in order and tracked in user_version.
+const MIGRATIONS: &[&str] = &[
+    // 1: groups (herdr workspaces or user-made), event workspace column.
+    r#"
+    CREATE TABLE IF NOT EXISTS groups(
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      source_key TEXT UNIQUE,
+      created INTEGER NOT NULL
+    );
+    ALTER TABLE clips ADD COLUMN group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL;
+    ALTER TABLE clips ADD COLUMN group_manual INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE events ADD COLUMN workspace TEXT;
+    UPDATE events SET workspace = json_extract(ctx, '$.herdr.workspace');
+    CREATE INDEX IF NOT EXISTS clips_group ON clips(group_id, last_seen);
+    CREATE INDEX IF NOT EXISTS events_ws ON events(workspace, kind, clip_id);
+    "#,
+];
+
 pub struct Store {
     pub(crate) conn: Connection,
     blob_dir: PathBuf,
@@ -114,7 +133,23 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Store { conn, blob_dir: dir.join("blobs") })
+        let mut store = Store { conn, blob_dir: dir.join("blobs") };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    fn migrate(&mut self) -> Result<()> {
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(sql)?;
+            tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
+            tx.commit()?;
+            if i == 0 {
+                self.regroup_all()?;
+            }
+        }
+        Ok(())
     }
 
     pub fn blob_path(&self, clip: &Clip) -> Option<PathBuf> {
@@ -134,6 +169,7 @@ impl Store {
         )?;
         let event_id = self.insert_event(EventKind::Copy, clip_id, ctx, ts)?;
         lineage::link_copy(&self.conn, clip_id, event_id)?;
+        self.auto_group(clip_id)?;
         Ok((clip_id, event_id))
     }
 
@@ -142,13 +178,28 @@ impl Store {
             "UPDATE clips SET pastes = pastes + 1, last_seen = ?2 WHERE id = ?1",
             params![clip_id, ts],
         )?;
-        self.insert_event(EventKind::Paste, clip_id, ctx, ts)
+        let id = self.insert_event(EventKind::Paste, clip_id, ctx, ts)?;
+        // Make sure the destination workspace has a group, so the paste shows
+        // up there as incoming, and let ungrouped clips join it.
+        if let Some(ws) = ctx.herdr.as_ref().and_then(|h| h.workspace.as_deref()) {
+            self.herdr_group(ws)?;
+        }
+        self.auto_group(clip_id)?;
+        Ok(id)
     }
 
     fn insert_event(&mut self, kind: EventKind, clip_id: i64, ctx: &Context, ts: i64) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO events(ts, kind, clip_id, ctx_key, label, ctx) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![ts, kind.as_str(), clip_id, ctx.key(), ctx.label(), serde_json::to_string(ctx)?],
+            "INSERT INTO events(ts, kind, clip_id, ctx_key, label, ctx, workspace) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ts,
+                kind.as_str(),
+                clip_id,
+                ctx.key(),
+                ctx.label(),
+                serde_json::to_string(ctx)?,
+                ctx.herdr.as_ref().and_then(|h| h.workspace.clone())
+            ],
         )?;
         let id = self.conn.last_insert_rowid();
         self.refresh_fts(clip_id)?;
@@ -226,7 +277,7 @@ impl Store {
         )?;
         let body = if secret != 0 { preview.clone() } else { text.unwrap_or(preview) };
         let mut stmt = self.conn.prepare_cached(
-            "SELECT DISTINCT kind || ' ' || label FROM events WHERE clip_id = ?1",
+            "SELECT DISTINCT kind || ' ' || label || COALESCE(' ' || workspace, '') FROM events WHERE clip_id = ?1",
         )?;
         let labels: Vec<String> = stmt
             .query_map([clip_id], |r| r.get(0))?
@@ -261,9 +312,74 @@ impl Store {
     /// Clips matching every whitespace-separated term in body or place labels,
     /// newest first. An empty query lists recent clips.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ClipRow>> {
-        let terms: Vec<&str> = query.split_whitespace().collect();
-        let mut sql = format!("SELECT {CLIP_COLS} FROM clips c WHERE 1=1");
+        self.query(&Query { text: query.into(), limit, ..Default::default() })
+    }
+
+    /// Paged, optionally group-filtered search. In a herdr workspace group,
+    /// clips from other groups that were pasted into that workspace are
+    /// included and marked `incoming`.
+    pub fn query(&self, q: &Query) -> Result<Vec<ClipRow>> {
+        let f = self.filter(&q.text)?;
+        let mut sql = format!("SELECT {CLIP_COLS} FROM clips c WHERE {}", f.sql);
+        let mut args = f.args.clone();
+        let mut focus: Option<(i64, Option<String>)> = None;
+        match &q.group {
+            GroupSel::All => {}
+            GroupSel::Ungrouped => sql.push_str(" AND c.group_id IS NULL"),
+            GroupSel::Id(g) => {
+                let ws = self.group(*g)?.and_then(|g| g.workspace);
+                args.push(g.to_string());
+                let n = args.len();
+                match &ws {
+                    Some(w) => {
+                        args.push(w.clone());
+                        sql.push_str(&format!(
+                            " AND (c.group_id = ?{n} OR c.id IN (SELECT clip_id FROM events WHERE kind = 'paste' AND workspace = ?{}))",
+                            n + 1
+                        ));
+                    }
+                    None => sql.push_str(&format!(" AND c.group_id = ?{n}")),
+                }
+                focus = Some((*g, ws));
+            }
+        }
+        let limit = if q.limit == 0 { 50 } else { q.limit.min(500) };
+        sql.push_str(&format!(" ORDER BY c.pinned DESC, c.last_seen DESC LIMIT {limit} OFFSET {}", q.offset));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let clips: Vec<Clip> = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), clip_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut rows = self.rows(clips)?;
+        if let Some((g, _)) = focus {
+            for r in &mut rows {
+                r.incoming = r.group.as_ref().map(|x| x.id) != Some(g);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// SQL condition over `c` (clips) for a search string: FTS terms plus
+    /// `group:name` / `g:name` / `g:none` filters.
+    pub(crate) fn filter(&self, text: &str) -> Result<Filter> {
+        let mut sql = String::from("1=1");
         let mut args: Vec<String> = Vec::new();
+        let mut terms: Vec<&str> = Vec::new();
+        for t in text.split_whitespace() {
+            let lower = t.to_lowercase();
+            if let Some(name) = lower.strip_prefix("group:").or_else(|| lower.strip_prefix("g:")) {
+                if name == "none" || name == "ungrouped" {
+                    sql.push_str(" AND c.group_id IS NULL");
+                } else {
+                    args.push(format!("%{}%", name.replace('%', "\\%").replace('_', "\\_")));
+                    sql.push_str(&format!(
+                        " AND c.group_id IN (SELECT id FROM groups WHERE lower(name) LIKE ?{} ESCAPE '\\')",
+                        args.len()
+                    ));
+                }
+            } else {
+                terms.push(t);
+            }
+        }
         let long: Vec<&str> = terms.iter().copied().filter(|t| t.chars().count() >= 3).collect();
         if !long.is_empty() {
             let m = long
@@ -281,12 +397,7 @@ impl Store {
                 " AND c.id IN (SELECT rowid FROM fts WHERE body LIKE ?{n} ESCAPE '\\' OR labels LIKE ?{n} ESCAPE '\\')"
             ));
         }
-        sql.push_str(&format!(" ORDER BY c.pinned DESC, c.last_seen DESC LIMIT {limit}"));
-        let mut stmt = self.conn.prepare(&sql)?;
-        let clips: Vec<Clip> = stmt
-            .query_map(rusqlite::params_from_iter(args.iter()), clip_from_row)?
-            .collect::<rusqlite::Result<_>>()?;
-        self.rows(clips)
+        Ok(Filter { sql, args })
     }
 
     pub fn rows(&self, clips: Vec<Clip>) -> Result<Vec<ClipRow>> {
@@ -294,7 +405,16 @@ impl Store {
             .into_iter()
             .map(|clip| {
                 let (sources, destinations) = self.places(clip.id)?;
-                Ok(ClipRow { clip, sources, destinations })
+                let group = self.clip_group(clip.id)?;
+                let mut workspaces: Vec<String> = Vec::new();
+                for p in sources.iter().chain(&destinations) {
+                    if let Some(w) = &p.workspace {
+                        if !workspaces.contains(w) {
+                            workspaces.push(w.clone());
+                        }
+                    }
+                }
+                Ok(ClipRow { clip, sources, destinations, group, incoming: false, workspaces })
             })
             .collect()
     }
@@ -302,18 +422,25 @@ impl Store {
     /// Distinct copy sources and paste destinations, most recent first.
     pub fn places(&self, clip_id: i64) -> Result<(Vec<Place>, Vec<Place>)> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT kind, ctx_key, label, ctx, MAX(ts) FROM events WHERE clip_id = ?1
+            "SELECT kind, ctx_key, label, ctx, MAX(ts), workspace FROM events WHERE clip_id = ?1
              GROUP BY kind, ctx_key ORDER BY MAX(ts) DESC",
         )?;
         let mut src = Vec::new();
         let mut dst = Vec::new();
         let rows = stmt.query_map([clip_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
         })?;
         for row in rows {
-            let (kind, key, label, ctx, ts) = row?;
+            let (kind, key, label, ctx, ts, workspace) = row?;
             let ctx: Context = serde_json::from_str(&ctx).unwrap_or_default();
-            let place = Place { key, label, kind: context::kind(&ctx).into(), last_ts: ts };
+            let place = Place { key, label, kind: context::kind(&ctx).into(), last_ts: ts, workspace };
             if kind == "paste" { dst.push(place) } else { src.push(place) }
         }
         Ok((src, dst))
@@ -414,6 +541,7 @@ impl Store {
             ("pastes", "SELECT COUNT(*) FROM events WHERE kind='paste'"),
             ("links", "SELECT COUNT(*) FROM links"),
             ("images", "SELECT COUNT(*) FROM clips WHERE kind='image'"),
+            ("groups", "SELECT COUNT(*) FROM groups"),
         ] {
             m.insert(k, self.conn.query_row(sql, [], |r| r.get(0))?);
         }
@@ -435,4 +563,9 @@ pub fn clip_hash(cap: &Captured) -> String {
         }
     }
     hex::encode(h.finalize())
+}
+
+pub(crate) struct Filter {
+    pub sql: String,
+    pub args: Vec<String>,
 }

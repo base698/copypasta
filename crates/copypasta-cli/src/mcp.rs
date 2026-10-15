@@ -22,14 +22,20 @@ fn tools() -> Value {
         },
         {
             "name": "clipboard_search",
-            "description": "Search the user's clipboard history (last 30 days). Matches clip text and the places it was copied from / pasted into, e.g. 'slack dev', 'docs.rs', 'herdr claude'. Empty query lists the most recent clips.",
+            "description": "Search the user's clipboard history (last 30 days). Matches clip text and the places it was copied from / pasted into, e.g. 'slack dev', 'docs.rs', 'herdr claude'. Add g:<name> to limit to a group (herdr workspaces are groups automatically; g:none = ungrouped). Empty query lists the most recent clips. Page with offset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "limit": { "type": "integer", "default": 15, "maximum": 100 }
+                    "limit": { "type": "integer", "default": 15, "maximum": 100 },
+                    "offset": { "type": "integer", "default": 0 }
                 }
             }
+        },
+        {
+            "name": "clipboard_groups",
+            "description": "List clipboard groups: one per herdr workspace (automatic) plus any the user made, with clip counts and how many clips from other workspaces were pasted in. Optional query narrows to groups with matching clips.",
+            "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } } }
         }
     ])
 }
@@ -47,7 +53,8 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<String> {
         "clipboard_search" => {
             let q = args.get("query").and_then(Value::as_str).unwrap_or("");
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(15).min(100) as usize;
-            let rows = store.search(q, limit)?;
+            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let rows = store.query(&copypasta_core::Query { text: q.into(), limit, offset, ..Default::default() })?;
             if rows.is_empty() {
                 return Ok("No matching clips.".into());
             }
@@ -56,9 +63,10 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<String> {
                 let src: Vec<&str> = r.sources.iter().take(2).map(|p| p.label.as_str()).collect();
                 let dst: Vec<&str> = r.destinations.iter().take(4).map(|p| p.label.as_str()).collect();
                 out.push_str(&format!(
-                    "#{} [{}] {} — {}\n  from: {}\n  into: {}\n",
+                    "#{} [{}]{} {} — {}\n  from: {}\n  into: {}\n",
                     r.clip.id,
                     r.clip.kind.as_str(),
+                    r.group.as_ref().map(|g| format!(" group={}", g.name)).unwrap_or_default(),
                     fmt_ts(r.clip.last_seen),
                     truncate(&r.clip.preview, 200),
                     if src.is_empty() { "?".into() } else { src.join("; ") },
@@ -66,6 +74,21 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<String> {
                 ));
             }
             Ok(out)
+        }
+        "clipboard_groups" => {
+            let q = args.get("query").and_then(Value::as_str).unwrap_or("");
+            let mut out = String::new();
+            for g in store.group_summaries(q)? {
+                out.push_str(&format!(
+                    "{}{}: {} clips{}, last active {}\n",
+                    g.name,
+                    g.workspace.as_ref().map(|w| format!(" (herdr workspace {w})")).unwrap_or_default(),
+                    g.count,
+                    if g.incoming > 0 { format!(", {} pasted in from other groups", g.incoming) } else { String::new() },
+                    fmt_ts(g.last_seen)
+                ));
+            }
+            Ok(if out.is_empty() { "No groups.".into() } else { out })
         }
         _ => anyhow::bail!("unknown tool {name}"),
     }

@@ -1,19 +1,16 @@
-// Copypasta panel: search list on the left, selected clip + lineage DAG on the right.
+// Copypasta panel: grouped, paged clip list on the left; the selected clip
+// (or group) and its lineage DAG on the right.
 
 const T = window.__TAURI__;
 const invoke = (cmd, args) => T.core.invoke(cmd, args);
+const call = (cmd, args = {}) => invoke("api", { cmd, args });
 
 const $q = document.getElementById("q");
 const $list = document.getElementById("list");
 const $detail = document.getElementById("detail");
 const $status = document.getElementById("status");
 
-let rows = [];
-let sel = 0;
-let selectedId = null;
-let searchTimer = null;
-const thumbs = new Map();
-
+const PAGE = 40;
 const PLACE_COLOR = { herdr: "var(--herdr)", slack: "var(--slack)", web: "var(--web)", app: "var(--app)", system: "var(--system)" };
 const KIND_BADGE = { text: "Aa", url: "↗", image: "▣", file: "📄" };
 const CONTENT_LINKS = new Set(["contains", "excerpt", "similar", "image_similar", "same_url"]);
@@ -22,7 +19,24 @@ const LINK_TEXT = {
   same_url: "from URL", via_context: "answer",
 };
 
+let groups = [];          // summaries from `groups`, in display order
+let allGroups = [];       // every group, for the "move to" menu
+const lists = new Map();  // group key -> { rows, done, loading }
+let openKeys = new Set(); // expanded group keys
+let expanded = loadExpanded(); // remembered expansion when not searching
+let entries = [];         // visible rows: {t:"g", key, g} | {t:"c", key, row}
+let sel = 0;
+let cursor = null;        // {t, key, id?} — survives re-renders
+let query = "";
+let refreshSeq = 0;
+let searchTimer = null;
+const thumbs = new Map();
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fit = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+const gkey = (g) => (g.id == null ? "none" : String(g.id));
+const gsel = (key) => (key === "none" ? "none" : Number(key));
+const searching = () => query.split(/\s+/).some((t) => t && !/^(g|group):/i.test(t));
 
 function ago(ms) {
   const d = (Date.now() - ms) / 1000;
@@ -35,78 +49,248 @@ function ago(ms) {
 }
 const hhmm = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
-function chip(place, dst) {
-  const c = PLACE_COLOR[place.kind] || PLACE_COLOR.app;
-  return `<span class="chip${dst ? " dst" : ""}" style="--c:${c}" title="${esc((dst ? "pasted into " : "copied from ") + place.label)}">${dst ? "→ " : ""}${esc(place.label)}</span>`;
+function loadExpanded() {
+  try {
+    const v = JSON.parse(localStorage.getItem("copypasta.expanded"));
+    return Array.isArray(v) ? new Set(v) : null;
+  } catch {
+    return null;
+  }
+}
+function saveExpanded() {
+  if (searching()) return;
+  expanded = new Set(openKeys);
+  try {
+    localStorage.setItem("copypasta.expanded", JSON.stringify([...expanded]));
+  } catch {}
 }
 
-async function refresh(keepSelection = true) {
+// ---- data
+
+async function refresh({ keep = true } = {}) {
+  query = $q.value.trim();
+  const seq = ++refreshSeq;
+  let gs, all;
   try {
-    rows = await invoke("search", { query: $q.value, limit: 200 });
+    [gs, all] = await Promise.all([call("groups", { query }), call("all_groups")]);
   } catch (e) {
     console.error(e);
-    rows = [];
+    gs = [];
+    all = [];
   }
-  if (keepSelection && selectedId != null) {
-    const i = rows.findIndex((r) => r.id === selectedId);
-    sel = i >= 0 ? i : 0;
+  if (seq !== refreshSeq) return;
+  groups = gs;
+  allGroups = all;
+  const keys = new Set(groups.map(gkey));
+  if (searching() || /(^|\s)(g|group):/i.test(query)) {
+    openKeys = new Set(groups.filter((g) => g.count + g.incoming > 0).map(gkey));
   } else {
-    sel = 0;
+    openKeys = new Set([...(expanded ?? new Set(groups.slice(0, 1).map(gkey)))].filter((k) => keys.has(k)));
   }
-  renderList();
-  showSelected();
+  const prev = new Map(lists);
+  lists.clear();
+  await Promise.all(
+    [...openKeys].map((k) => loadPage(k, keep ? Math.max(PAGE, prev.get(k)?.rows.length ?? 0) : PAGE)),
+  );
+  if (seq !== refreshSeq) return;
+  if (!keep) cursor = null;
+  render();
 }
 
-function renderList() {
-  $list.innerHTML = rows
-    .map((r, i) => {
-      const badge = r.kind === "image" ? `<span class="kind" data-thumb="${r.id}">▣</span>` : `<span class="kind">${KIND_BADGE[r.kind] || "Aa"}</span>`;
-      const src = r.sources.slice(0, 1).map((p) => chip(p, false)).join("");
-      const dst = r.destinations.slice(0, 2).map((p) => chip(p, true)).join("");
-      const more = r.destinations.length > 2 ? `<span class="chip dst">+${r.destinations.length - 2}</span>` : "";
-      const mono = /[{};=<>]|^\s*(\$|git |cargo |npm )/.test(r.preview) && r.kind === "text";
-      return `<li data-i="${i}" class="${i === sel ? "sel" : ""}" role="option">
-        ${badge}
-        <div class="body">
-          <div class="preview${mono ? " mono" : ""}">${esc(r.preview)}</div>
-          <div class="meta">${r.pinned ? '<span class="pin">★</span>' : ""}${src}${dst}${more}<span class="time">${ago(r.last_seen)}</span></div>
-        </div></li>`;
-    })
-    .join("");
-  if (!rows.length) {
-    $list.innerHTML = `<li class="empty" style="display:block">${$q.value ? "No matches." : "No clips yet."}</li>`;
+async function loadPage(key, limit = PAGE) {
+  let l = lists.get(key);
+  if (!l) lists.set(key, (l = { rows: [], done: false, loading: false }));
+  if (l.done || l.loading) return;
+  l.loading = true;
+  try {
+    const rows = await call("search", { query, group: gsel(key), offset: l.rows.length, limit });
+    const seen = new Set(l.rows.map((r) => r.id));
+    l.rows.push(...rows.filter((r) => !seen.has(r.id)));
+    l.done = rows.length < limit;
+  } catch (e) {
+    console.error(e);
+    l.done = true;
+  } finally {
+    l.loading = false;
   }
-  $list.querySelectorAll("[data-thumb]").forEach(loadThumb);
 }
+
+// ---- list
+
+// herdr labels are "herdr <agent> · <tab> · <cwd>"; in the list keep the
+// agent and tab, and name the workspace only when it isn't this group's.
+function chipLabel(place, g) {
+  if (place.kind !== "herdr") return place.label;
+  const parts = place.label.replace(/^herdr /, "").split(" · ").filter((p) => !/^[~/]/.test(p));
+  const ws = place.workspace && place.workspace !== g?.workspace ? ` @ ${place.workspace}` : "";
+  return parts.join(" · ") + ws;
+}
+
+function chip(place, dst, g) {
+  const c = PLACE_COLOR[place.kind] || PLACE_COLOR.app;
+  return `<span class="chip${dst ? " dst" : ""}" style="--c:${c}" title="${esc((dst ? "pasted into " : "copied from ") + place.label + (place.workspace ? ` (workspace ${place.workspace})` : ""))}">${dst ? "→ " : ""}${esc(chipLabel(place, g))}</span>`;
+}
+
+function groupHeader(g, open, i) {
+  const tag = g.workspace ? `<span class="gtag" title="herdr workspace ${esc(g.workspace)}">herdr</span>` : "";
+  const inc = g.incoming ? `<span class="gin" title="pasted in from other groups">+${g.incoming} in</span>` : "";
+  return `<li class="group${open ? " open" : ""}" data-i="${i}" data-key="${gkey(g)}">
+    <span class="chev">${open ? "▾" : "▸"}</span>
+    <span class="gname">${esc(g.name)}</span>${tag}
+    <span class="gcount">${g.count}</span>${inc}
+    <span class="time">${g.count + g.incoming ? ago(g.last_seen) : ""}</span>
+  </li>`;
+}
+
+function clipRow(r, g, i) {
+  const badge = r.kind === "image" ? `<span class="kind" data-thumb="${r.id}">▣</span>` : `<span class="kind">${KIND_BADGE[r.kind] || "Aa"}</span>`;
+  const src = r.sources.slice(0, 1).map((p) => chip(p, false, g)).join("");
+  const dst = r.destinations.slice(0, 2).map((p) => chip(p, true, g)).join("");
+  const more = r.destinations.length > 2 ? `<span class="chip dst">+${r.destinations.length - 2}</span>` : "";
+  let cross = "";
+  if (r.incoming) {
+    cross = `<span class="chip in" title="belongs to ${esc(r.group?.name ?? "no group")}; pasted into this workspace">⇢ from ${esc(r.group?.name ?? "ungrouped")}</span>`;
+  } else {
+    const others = r.workspaces.filter((w) => w !== g.workspace);
+    if (g.workspace && others.length) cross = `<span class="chip in" title="also pasted into these herdr workspaces">↔ ${esc(others.join(", "))}</span>`;
+  }
+  const mono = /[{};=<>]|^\s*(\$|git |cargo |npm )/.test(r.preview) && r.kind === "text";
+  return `<li class="clip${r.incoming ? " incoming" : ""}" data-i="${i}" data-id="${r.id}" draggable="true" role="option">
+    ${badge}
+    <div class="body">
+      <div class="preview${mono ? " mono" : ""}">${esc(r.preview)}</div>
+      <div class="meta">${r.pinned ? '<span class="pin">★</span>' : ""}${cross}${src}${dst}${more}<span class="time">${ago(r.last_seen)}</span></div>
+    </div></li>`;
+}
+
+let moreObserver = null;
+function render() {
+  entries = [];
+  let html = "";
+  for (const g of groups) {
+    const key = gkey(g);
+    const open = openKeys.has(key);
+    entries.push({ t: "g", key, g });
+    html += groupHeader(g, open, entries.length - 1);
+    if (!open) continue;
+    const l = lists.get(key);
+    for (const r of l?.rows ?? []) {
+      entries.push({ t: "c", key, row: r, g });
+      html += clipRow(r, g, entries.length - 1);
+    }
+    if (l && !l.done) html += `<li class="more" data-more="${key}">Loading more…</li>`;
+    else if (l && !l.rows.length) html += `<li class="hint">${g.id == null ? "Nothing ungrouped." : "Empty. Drag clips here."}</li>`;
+  }
+  if (!groups.length) html = `<li class="hint">${query ? "No matches." : "No clips yet. Copy something."}</li>`;
+  const top = $list.scrollTop;
+  $list.innerHTML = html;
+  $list.scrollTop = top;
+  $list.querySelectorAll("[data-thumb]").forEach(loadThumb);
+
+  moreObserver?.disconnect();
+  moreObserver = new IntersectionObserver((obs) => {
+    for (const o of obs) {
+      if (!o.isIntersecting) continue;
+      const key = o.target.dataset.more;
+      const l = lists.get(key);
+      if (l && !l.loading && !l.done) loadPage(key).then(render);
+    }
+  }, { root: $list, rootMargin: "200px" });
+  $list.querySelectorAll("[data-more]").forEach((el) => moreObserver.observe(el));
+  requestAnimationFrame(checkMore);
+
+  let i = -1;
+  if (cursor) {
+    i = entries.findIndex((e) => e.t === cursor.t && e.key === cursor.key && (e.t === "g" || e.row.id === cursor.id));
+    if (i < 0 && cursor.t === "c") i = entries.findIndex((e) => e.t === "c" && e.row.id === cursor.id);
+    if (i < 0 && cursor.t === "c") i = entries.findIndex((e) => e.t === "g" && e.key === cursor.key);
+  }
+  if (i < 0) i = entries.findIndex((e) => e.t === "c");
+  if (i < 0) i = 0;
+  select(i, { scroll: !cursor });
+}
+
+// Backup for the observer (which only fires while the page is rendering):
+// load the next page of any group whose "more" row is near the viewport.
+function checkMore() {
+  const bottom = $list.getBoundingClientRect().bottom + 200;
+  for (const el of $list.querySelectorAll("[data-more]")) {
+    if (el.getBoundingClientRect().top > bottom) continue;
+    const key = el.dataset.more;
+    const l = lists.get(key);
+    if (l && !l.loading && !l.done) loadPage(key).then(render);
+  }
+}
+let scrollTimer = null;
+$list.addEventListener("scroll", () => {
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(checkMore, 60);
+});
 
 async function loadThumb(el) {
   const id = Number(el.dataset.thumb);
-  if (!thumbs.has(id)) thumbs.set(id, invoke("image", { id, max: 96 }).catch(() => null));
+  if (!thumbs.has(id)) thumbs.set(id, call("image", { id, max: 96 }).catch(() => null));
   const url = await thumbs.get(id);
   if (url) el.innerHTML = `<img src="${url}" alt="">`;
 }
 
-function select(i) {
-  if (!rows.length) return;
-  sel = Math.max(0, Math.min(rows.length - 1, i));
-  $list.querySelectorAll("li").forEach((li) => li.classList.toggle("sel", Number(li.dataset.i) === sel));
-  $list.querySelector("li.sel")?.scrollIntoView({ block: "nearest" });
-  showSelected();
+let shownKey = null;
+function select(i, { scroll = true } = {}) {
+  if (!entries.length) {
+    cursor = null;
+    showEmpty();
+    return;
+  }
+  sel = Math.max(0, Math.min(entries.length - 1, i));
+  const e = entries[sel];
+  cursor = e.t === "g" ? { t: "g", key: e.key } : { t: "c", key: e.key, id: e.row.id };
+  $list.querySelectorAll("li[data-i]").forEach((li) => li.classList.toggle("sel", Number(li.dataset.i) === sel));
+  if (scroll) $list.querySelector("li.sel")?.scrollIntoView({ block: "nearest" });
+  const showKey = e.t === "g" ? `g:${e.key}:${e.g.count}:${e.g.name}` : `c:${e.row.id}:${e.row.group?.id}:${e.row.pinned}:${e.row.last_seen}`;
+  if (showKey !== shownKey) {
+    shownKey = showKey;
+    if (e.t === "g") showGroup(e.g);
+    else showClip(e.row);
+  }
+  // Prefetch the next page as the cursor nears the end of a group.
+  if (e.t === "c") {
+    const l = lists.get(e.key);
+    const idx = l?.rows.findIndex((r) => r.id === e.row.id) ?? -1;
+    if (l && !l.done && !l.loading && idx >= l.rows.length - 5) loadPage(e.key).then(render);
+  }
+}
+
+function toggle(key, open = !openKeys.has(key)) {
+  if (open) openKeys.add(key);
+  else openKeys.delete(key);
+  saveExpanded();
+  if (open && !lists.has(key)) loadPage(key).then(render);
+  else render();
+}
+
+// ---- detail
+
+function showEmpty() {
+  shownKey = null;
+  $detail.innerHTML = `<div class="empty">${query ? "No clips match that search." : "Nothing copied yet. Copy something and it shows up here."}</div>`;
+}
+
+function groupOptions(r) {
+  const cur = r.group?.id;
+  let o = "";
+  if (r.group?.manual || !r.group) o += `<option value="auto">Automatic (herdr workspace)</option>`;
+  for (const g of allGroups) o += `<option value="${g.id}" ${g.id === cur ? "selected" : ""}>${esc(g.name)}${g.workspace ? " · herdr" : ""}</option>`;
+  o += `<option value="none" ${cur == null ? "selected" : ""}>No group</option>`;
+  o += `<option value="new">New group…</option>`;
+  return o;
 }
 
 let detailSeq = 0;
-async function showSelected() {
-  const r = rows[sel];
-  if (!r) {
-    selectedId = null;
-    $detail.innerHTML = `<div class="empty">${$q.value ? "No clips match that search." : "Nothing copied yet. Copy something and it shows up here."}</div>`;
-    return;
-  }
-  selectedId = r.id;
+async function showClip(r) {
   const seq = ++detailSeq;
   const [graph, img] = await Promise.all([
-    invoke("graph", { id: r.id }).catch(() => null),
-    r.kind === "image" ? invoke("image", { id: r.id, max: 900 }).catch(() => null) : null,
+    call("graph", { id: r.id }).catch(() => null),
+    r.kind === "image" ? call("image", { id: r.id, max: 900 }).catch(() => null) : null,
   ]);
   if (seq !== detailSeq) return;
   let content;
@@ -118,6 +302,7 @@ async function showSelected() {
     content = `<pre>${esc(r.secret ? r.preview : r.text ?? r.preview)}</pre>`;
   }
   const facts = `copied ${r.copies}× · pasted ${r.pastes}× · first ${ago(r.first_seen)}`;
+  const crossed = r.workspaces.length > 1 ? `<span class="crossed" title="herdr workspaces this clip moved between">↔ ${esc(r.workspaces.join(" → "))}</span>` : "";
   $detail.innerHTML = `
     <div class="content">${content}</div>
     <div class="actions">
@@ -127,128 +312,145 @@ async function showSelected() {
       <button data-act="delete">Delete</button>
       <span class="facts">${esc(facts)}</span>
     </div>
+    <div class="actions grouprow">
+      <label>Group <select id="grp" title="⌘G">${groupOptions(r)}</select></label>
+      ${r.group?.manual ? '<span class="facts">set by you</span>' : r.group ? '<span class="facts">automatic</span>' : ""}
+      <span id="newgrp" hidden><input id="newname" placeholder="New group name" maxlength="80"><button data-act="create">Create</button></span>
+      ${crossed}
+    </div>
     <div class="dagwrap"><h3>Copy / paste path</h3><div id="dag"></div>
       <div class="legend"><span><i></i>pasted / re-copied</span><span><i class="c"></i>content link</span><span><i class="w"></i>copied out of an assistant after a paste</span></div>
     </div>`;
+  document.getElementById("grp").addEventListener("change", onGroupChange);
   if (graph) renderDag(document.getElementById("dag"), graph);
 }
 
-// ---- DAG layout: time flows down. Row = longest path from a root; each row
-// is ordered by time and centered.
-const NW = 236, NH = 66, GX = 18, GY = 46, PAD = 16;
-
-function nodeTitle(n) {
-  const h = n.ctx.herdr;
-  if (h) {
-    const who = h.agent || h.pane_label || "shell";
-    const tab = h.tab && !/^\d+$/.test(h.tab) ? ` · ${h.tab}` : "";
-    return `herdr ${who}${tab}`;
-  }
-  return n.label;
+function showGroup(g) {
+  detailSeq++;
+  const desc = g.id == null
+    ? "Clips copied outside herdr that haven't been pasted into a workspace yet, plus anything you took out of a group."
+    : g.workspace
+      ? `Automatic group for the herdr workspace <b>${esc(g.workspace)}</b>: clips first copied there, and clips from outside herdr first pasted there.`
+      : "A group you made. Drag clips onto it, or pick it from a clip's Group menu.";
+  const inc = g.incoming ? `<p>${g.incoming} clip${g.incoming === 1 ? "" : "s"} from other groups were pasted into this workspace. They're listed here with ⇢ but still belong to their own group.</p>` : "";
+  $detail.innerHTML = `
+    <div class="groupinfo">
+      <h2>${esc(g.name)}</h2>
+      <p class="muted">${g.count} clip${g.count === 1 ? "" : "s"}${query ? " matching" : ""}${g.count + g.incoming ? " · last active " + ago(g.last_seen) : ""}</p>
+      <p>${desc}</p>${inc}
+      ${g.id == null ? "" : `
+      <div class="actions plain">
+        <input id="rename" value="${esc(g.name)}" maxlength="80" aria-label="Group name">
+        <button data-act="rename">Rename</button>
+        <button data-act="delgroup" class="danger">Delete group</button>
+      </div>
+      <p class="muted small">Deleting a group keeps its clips; they become ungrouped.${g.workspace ? " New copies in this workspace will start a fresh group." : ""}</p>`}
+      <p class="muted small"><kbd>⏎</kbd> or <kbd>→</kbd>/<kbd>←</kbd> expand and collapse · search <code>g:${esc(g.name.split(/\s+/)[0].toLowerCase())}</code> to filter</p>
+    </div>`;
 }
 
-function nodeDetail(n) {
-  const h = n.ctx.herdr;
-  if (h) return [h.cwd ? h.cwd.replace(/^\/Users\/[^/]+/, "~") : null, h.title].filter(Boolean).join(" · ");
-  return n.detail || "";
-}
-
-function renderDag(el, g) {
-  if (!g.nodes.length) {
-    el.innerHTML = `<div class="empty">No copy or paste events recorded for this clip yet.</div>`;
+async function onGroupChange(ev) {
+  const e = entries[sel];
+  if (e?.t !== "c") return;
+  const v = ev.target.value;
+  if (v === "new") {
+    document.getElementById("newgrp").hidden = false;
+    document.getElementById("newname").focus();
     return;
   }
-  const byId = new Map(g.nodes.map((n) => [n.id, n]));
-  const parents = new Map(g.nodes.map((n) => [n.id, []]));
-  for (const e of g.edges) if (byId.has(e.from) && byId.has(e.to)) parents.get(e.to).push(e.from);
-  const layer = new Map();
-  const depth = (id, seen = new Set()) => {
-    if (layer.has(id)) return layer.get(id);
-    if (seen.has(id)) return 0;
-    seen.add(id);
-    const ps = parents.get(id) || [];
-    const d = ps.length ? Math.max(...ps.map((p) => depth(p, seen))) + 1 : 0;
-    layer.set(id, d);
-    return d;
-  };
-  g.nodes.forEach((n) => depth(n.id));
-  const rowsOf = [];
-  for (const n of g.nodes) (rowsOf[layer.get(n.id)] ||= []).push(n);
-  const widest = Math.max(...rowsOf.map((r) => r.length));
-  const avail = Math.max(el.clientWidth - PAD * 2, NW);
-  const W = Math.max(PAD * 2 + widest * (NW + GX) - GX, avail + PAD * 2);
-  const pos = new Map();
-  rowsOf.forEach((row, y) => {
-    row.sort((a, b) => a.ts - b.ts);
-    const rowW = row.length * (NW + GX) - GX;
-    const x0 = (W - rowW) / 2;
-    row.forEach((n, i) => pos.set(n.id, { x: x0 + i * (NW + GX), y: PAD + y * (NH + GY) }));
-  });
-  const H = PAD * 2 + rowsOf.length * (NH + GY) - GY;
-  const clipPreview = new Map(g.clips.map((c) => [c.id, c.preview]));
-
-  let svg = `<svg class="dag" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
-  for (const e of g.edges) {
-    const a = pos.get(e.from), b = pos.get(e.to);
-    if (!a || !b) continue;
-    const x1 = a.x + NW / 2, y1 = a.y + NH, x2 = b.x + NW / 2, y2 = b.y;
-    const my = (y1 + y2) / 2;
-    const cls = ["edge", e.weak ? "weak" : "", CONTENT_LINKS.has(e.kind) ? "content" : ""].join(" ");
-    svg += `<path class="${cls}" d="M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}"><title>${esc(LINK_TEXT[e.kind] || e.kind)}</title></path>`;
-    if (LINK_TEXT[e.kind]) svg += `<text class="elabel" x="${(x1 + x2) / 2 + 6}" y="${my + 3}">${esc(LINK_TEXT[e.kind])}</text>`;
+  try {
+    if (v === "auto") await call("reset_group", { id: e.row.id });
+    else await call("move", { id: e.row.id, group: v === "none" ? null : Number(v) });
+  } catch (err) {
+    flash(String(err));
   }
-  for (const n of g.nodes) {
-    const p = pos.get(n.id);
-    const other = n.clip_id !== g.focus;
-    const color = PLACE_COLOR[n.place] || PLACE_COLOR.app;
-    const title = other ? `clip #${n.clip_id}: ${clipPreview.get(n.clip_id) || ""}` : n.label;
-    const det = nodeDetail(n);
-    svg += `<g class="node${other ? " other" : " focus"}" data-clip="${n.clip_id}" transform="translate(${p.x},${p.y})">
-      <title>${esc(title)}${det ? "\n" + esc(det) : ""}</title>
-      <rect class="box" width="${NW}" height="${NH}" rx="9"/>
-      <rect width="4" height="${NH - 16}" x="0" y="8" rx="2" fill="${color}"/>
-      <text class="verb ${n.kind}" x="14" y="18">${n.kind === "copy" ? "COPIED FROM" : "PASTED INTO"}</text>
-      <text class="ts" x="${NW - 10}" y="18" text-anchor="end">${esc(hhmm(n.ts))}${other ? " · #" + n.clip_id : ""}</text>
-      <text class="label" x="14" y="37">${esc(fit(nodeTitle(n), 31))}</text>
-      <text class="det" x="14" y="54">${esc(fit(det, 40))}</text>
-    </g>`;
-  }
-  svg += "</svg>";
-  el.innerHTML = svg;
-  el.querySelectorAll(".node.other").forEach((node) =>
-    node.addEventListener("click", () => focusClip(Number(node.dataset.clip))),
-  );
-  el.querySelector(".node.focus")?.scrollIntoView({ block: "nearest", inline: "center" });
+  await afterMove(e.row.id);
 }
 
-const fit = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+async function afterMove(id) {
+  // Follow the clip into its new group.
+  const row = await call("clip", { id }).catch(() => null);
+  const key = row?.group ? String(row.group.id) : "none";
+  openKeys.add(key);
+  saveExpanded();
+  cursor = { t: "c", key, id };
+  shownKey = null;
+  await refresh({ keep: true });
+}
 
 async function focusClip(id) {
-  let i = rows.findIndex((r) => r.id === id);
+  let i = entries.findIndex((e) => e.t === "c" && e.row.id === id);
   if (i < 0) {
-    $q.value = "";
-    await refresh(false);
-    i = rows.findIndex((r) => r.id === id);
+    const row = await call("clip", { id }).catch(() => null);
+    if (!row) return;
+    const key = row.group ? String(row.group.id) : "none";
+    if ($q.value) $q.value = "";
+    query = "";
+    openKeys = new Set([...(expanded ?? []), key]);
+    saveExpanded();
+    cursor = { t: "c", key, id };
+    await refresh({ keep: true });
+    for (let n = 0; n < 25 && !entries.some((e) => e.t === "c" && e.row.id === id) && !lists.get(key)?.done; n++) {
+      await loadPage(key);
+      render();
+    }
+    i = entries.findIndex((e) => e.t === "c" && e.row.id === id);
   }
   if (i >= 0) select(i);
 }
+window.focusClip = focusClip;
 
 async function act(what) {
-  const r = rows[sel];
-  if (!r) return;
+  const e = entries[sel];
+  if (!e) return;
+  if (e.t === "g") {
+    const g = e.g;
+    if (what === "rename") {
+      const name = document.getElementById("rename").value.trim();
+      if (name && name !== g.name) {
+        await call("rename_group", { id: g.id, name }).catch((err) => flash(String(err)));
+        shownKey = null;
+        refresh();
+      }
+    } else if (what === "delgroup") {
+      const b = $detail.querySelector('[data-act="delgroup"]');
+      if (!b.dataset.armed) {
+        b.dataset.armed = "1";
+        b.textContent = "Click again to delete";
+        return;
+      }
+      await call("delete_group", { id: g.id });
+      cursor = null;
+      refresh();
+    } else if (what === "copy") {
+      toggle(e.key);
+    }
+    return;
+  }
+  const r = e.row;
   if (what === "copy" || what === "paste") {
     try {
       await invoke("restore", { id: r.id, paste: what === "paste" });
-    } catch (e) {
-      flash(String(e));
+    } catch (err) {
+      flash(String(err));
     }
   } else if (what === "pin") {
-    await invoke("pin", { id: r.id, pinned: !r.pinned });
+    await call("pin", { id: r.id, pinned: !r.pinned });
     refresh();
   } else if (what === "delete") {
-    await invoke("delete", { id: r.id });
-    selectedId = rows[sel + 1]?.id ?? rows[sel - 1]?.id ?? null;
+    await call("delete", { id: r.id });
+    const next = entries[sel + 1]?.t === "c" ? entries[sel + 1] : entries[sel - 1];
+    cursor = next ? (next.t === "g" ? { t: "g", key: next.key } : { t: "c", key: next.key, id: next.row.id }) : null;
     refresh();
+  } else if (what === "create") {
+    const name = document.getElementById("newname").value.trim();
+    if (!name) return;
+    try {
+      await call("create_group", { name, ids: [r.id] });
+    } catch (err) {
+      flash(String(err));
+    }
+    await afterMove(r.id);
   }
 }
 
@@ -265,7 +467,7 @@ async function renderStatus() {
     if (!s.accessibility) warn.push("no window titles");
     $status.innerHTML =
       (warn.length ? `<span class="warn">${warn.join(" · ")}</span><button id="grant">Grant access…</button>` : "") +
-      `<span>${s.stats.clips} clips · ${s.stats.pastes} pastes</span>`;
+      `<span>${s.stats.clips} clips · ${s.stats.groups ?? 0} groups</span>`;
     document.getElementById("grant")?.addEventListener("click", () => invoke("request_permissions"));
   } catch (e) {
     console.error(e);
@@ -273,33 +475,99 @@ async function renderStatus() {
 }
 
 // ---- events
+
 $q.addEventListener("input", () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => refresh(false), 70);
+  searchTimer = setTimeout(() => refresh({ keep: false }), 80);
 });
 
+const inField = (el) => el && el !== $q && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+
 document.addEventListener("keydown", (e) => {
+  const a = document.activeElement;
+  if (inField(a)) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      a.blur();
+      $q.focus();
+    } else if (e.key === "Enter" && a.id === "newname") {
+      e.preventDefault();
+      act("create");
+    } else if (e.key === "Enter" && a.id === "rename") {
+      e.preventDefault();
+      act("rename");
+    }
+    return;
+  }
+  const cur = entries[sel];
   if (e.key === "ArrowDown") { e.preventDefault(); select(sel + 1); }
   else if (e.key === "ArrowUp") { e.preventDefault(); select(sel - 1); }
   else if (e.key === "PageDown") { e.preventDefault(); select(sel + 10); }
   else if (e.key === "PageUp") { e.preventDefault(); select(sel - 10); }
-  else if (e.key === "Enter") { e.preventDefault(); act(e.metaKey ? "paste" : "copy"); }
+  else if (e.key === "ArrowRight" && cur && ($q.value === "" || $q.selectionStart === $q.value.length)) {
+    if (cur.t === "g") {
+      e.preventDefault();
+      if (!openKeys.has(cur.key)) toggle(cur.key, true);
+      else select(sel + 1);
+    }
+  } else if (e.key === "ArrowLeft" && cur && ($q.value === "" || $q.selectionStart === 0)) {
+    e.preventDefault();
+    if (cur.t === "c") {
+      const gi = entries.findIndex((x) => x.t === "g" && x.key === cur.key);
+      if (gi >= 0) select(gi);
+    } else if (openKeys.has(cur.key)) {
+      toggle(cur.key, false);
+    }
+  } else if (e.key === "Enter") { e.preventDefault(); act(e.metaKey ? "paste" : "copy"); }
   else if (e.key === "Escape") {
     e.preventDefault();
-    if ($q.value) { $q.value = ""; refresh(false); } else invoke("hide");
+    if ($q.value) { $q.value = ""; refresh({ keep: false }); } else invoke("hide");
   }
   else if (e.metaKey && e.key.toLowerCase() === "p") { e.preventDefault(); act("pin"); }
+  else if (e.metaKey && e.key.toLowerCase() === "g") { e.preventDefault(); document.getElementById("grp")?.focus(); }
   else if (e.metaKey && e.key === "Backspace") { e.preventDefault(); act("delete"); }
-  if (document.activeElement !== $q && !e.metaKey && e.key.length === 1) $q.focus();
+  else if (document.activeElement !== $q && !e.metaKey && !e.ctrlKey && e.key.length === 1) $q.focus();
 });
 
 $list.addEventListener("click", (e) => {
   const li = e.target.closest("li[data-i]");
-  if (li) select(Number(li.dataset.i));
+  if (!li) return;
+  const i = Number(li.dataset.i);
+  const ent = entries[i];
+  if (ent?.t === "g" && (e.target.closest(".chev") || sel === i)) toggle(ent.key);
+  select(i);
 });
 $list.addEventListener("dblclick", (e) => {
-  if (e.target.closest("li[data-i]")) act("copy");
+  const li = e.target.closest("li.clip");
+  if (li) act("copy");
 });
+
+// Drag clips onto group headers to move them.
+$list.addEventListener("dragstart", (e) => {
+  const li = e.target.closest("li.clip");
+  if (!li) return;
+  e.dataTransfer.setData("text/x-copypasta-clip", li.dataset.id);
+  e.dataTransfer.effectAllowed = "move";
+});
+$list.addEventListener("dragover", (e) => {
+  const li = e.target.closest("li.group");
+  if (!li || !e.dataTransfer.types.includes("text/x-copypasta-clip")) return;
+  e.preventDefault();
+  $list.querySelectorAll(".dropping").forEach((x) => x.classList.remove("dropping"));
+  li.classList.add("dropping");
+});
+$list.addEventListener("dragleave", (e) => e.target.closest?.("li.group")?.classList.remove("dropping"));
+$list.addEventListener("drop", async (e) => {
+  const li = e.target.closest("li.group");
+  const id = Number(e.dataTransfer.getData("text/x-copypasta-clip"));
+  $list.querySelectorAll(".dropping").forEach((x) => x.classList.remove("dropping"));
+  if (!li || !id) return;
+  e.preventDefault();
+  const key = li.dataset.key;
+  await call("move", { id, group: key === "none" ? null : Number(key) }).catch((err) => flash(String(err)));
+  await afterMove(id);
+});
+
 $detail.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-act]");
   if (b) act(b.dataset.act);
@@ -308,16 +576,17 @@ $detail.addEventListener("click", (e) => {
 let changeTimer = null;
 T.event.listen("clips-changed", () => {
   clearTimeout(changeTimer);
-  changeTimer = setTimeout(() => refresh(true), 150);
+  changeTimer = setTimeout(() => refresh({ keep: true }), 150);
 });
 T.event.listen("panel-shown", () => {
   $q.focus();
   $q.select();
-  selectedId = null;
-  refresh(false);
+  cursor = null;
+  shownKey = null;
+  refresh({ keep: false });
   renderStatus();
 });
 
 $q.focus();
-refresh(false);
+refresh({ keep: false });
 renderStatus();

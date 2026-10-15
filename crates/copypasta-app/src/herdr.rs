@@ -51,6 +51,7 @@ pub fn parse_snapshot(v: &Value) -> Option<HerdrCtx> {
     let a = agent.as_ref();
     Some(HerdrCtx {
         workspace: ws.as_ref().and_then(|w| s(w, "label")),
+        workspace_id: ws.as_ref().and_then(|w| s(w, "workspace_id")),
         tab: tab.as_ref().and_then(|t| s(t, "label")),
         pane_label: s(&pane, "label"),
         agent: a.and_then(|a| s(a, "agent")),

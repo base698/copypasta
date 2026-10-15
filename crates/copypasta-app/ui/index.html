@@ -11,7 +11,7 @@
     <header>
       <div class="search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-        <input id="q" type="text" placeholder="Search clips, Slack channels, URLs, herdr panes…" autocomplete="off" spellcheck="false" autofocus />
+        <input id="q" type="text" placeholder="Search clips, channels, URLs, panes… g:name for a group" autocomplete="off" spellcheck="false" autofocus />
       </div>
       <div id="status" class="status"></div>
     </header>
@@ -23,13 +23,16 @@
     </main>
     <footer>
       <span><kbd>↑</kbd><kbd>↓</kbd> select</span>
+      <span><kbd>←</kbd><kbd>→</kbd> groups</span>
       <span><kbd>⏎</kbd> copy</span>
       <span><kbd>⌘⏎</kbd> paste</span>
+      <span><kbd>⌘G</kbd> group</span>
       <span><kbd>⌘P</kbd> pin</span>
       <span><kbd>⌘⌫</kbd> delete</span>
       <span><kbd>esc</kbd> close</span>
     </footer>
   </div>
+  <script src="dag.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
