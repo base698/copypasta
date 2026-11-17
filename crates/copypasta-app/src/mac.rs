@@ -1,6 +1,6 @@
 //! macOS glue: frontmost app/window, browser URLs, the ⌘V event tap,
-//! permission checks, synthesized paste, the screenshot folder and the
-//! `copypasta panel` request.
+//! permission checks, synthesized paste, the screenshot and Downloads
+//! folders and the `copypasta panel` request.
 
 use copypasta_core::Context;
 use core_foundation::base::{CFRelease, CFType, CFTypeRef, TCFType};
@@ -327,7 +327,12 @@ pub fn show_over_full_screen(win: &tauri::WebviewWindow) {
     window.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary);
 }
 
-// ---- screenshots -------------------------------------------------------
+// ---- screenshots and downloads -----------------------------------------
+
+/// The user's Downloads folder.
+pub fn downloads_dir() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join("Downloads"))
+}
 
 /// The folder macOS saves screenshots in (⇧⌘5 → Options → Save to): the
 /// Desktop unless changed.

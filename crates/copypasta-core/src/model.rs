@@ -12,8 +12,8 @@ pub struct Captured {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub types: Vec<String>,
-    /// For an image read from a file rather than the clipboard (a saved
-    /// screenshot): that file.
+    /// For a clip read from a file rather than the clipboard (a saved
+    /// screenshot, a download): that file.
     pub path: Option<String>,
 }
 
@@ -63,7 +63,7 @@ pub struct Clip {
     pub copies: i64,
     pub pastes: i64,
     pub pinned: bool,
-    /// The file an image clip was read from (a saved screenshot).
+    /// The file the clip was read from (a saved screenshot, a download).
     pub path: Option<String>,
 }
 

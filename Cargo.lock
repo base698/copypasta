@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "copypasta"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "copypasta-core",
@@ -473,13 +473,14 @@ dependencies = [
 
 [[package]]
 name = "copypasta-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "copypasta-core",
  "core-foundation",
  "core-foundation-sys",
+ "image",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -492,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "copypasta-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

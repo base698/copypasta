@@ -11,8 +11,8 @@ mod platform {
 
 mod capture;
 mod commands;
+mod folders;
 mod herdr;
-mod shots;
 
 use capture::Shared;
 use copypasta_core::Store;

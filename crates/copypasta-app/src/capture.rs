@@ -2,23 +2,22 @@
 //! frontmost window's context, and records pastes reported by the key tap.
 
 use crate::platform;
-use crate::shots::{Shot, Watcher};
-use copypasta_core::{imaging, now_ms, Captured, ClipKind, Context, Store};
+use copypasta_core::{now_ms, Captured, Context, Store};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const RETENTION_MS: i64 = 30 * 86_400_000;
 pub const MAX_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(150);
-/// How far back saved screenshots are picked up the first time.
-const SCREENSHOT_BACKFILL_MS: i64 = 86_400_000;
-/// How often to check whether the screenshot folder setting changed.
-const SCREENSHOT_DIR_CHECK: Duration = Duration::from_secs(60);
 
 pub enum Msg {
     Paste { ts: i64 },
+    /// A file that arrived in a watched folder (see `folders`): `note` is
+    /// what it is ("Screenshot", "Download"), `ts` when it was taken or
+    /// arrived.
+    File { cap: Captured, note: &'static str, ts: i64 },
 }
 
 #[derive(Default)]
@@ -37,9 +36,6 @@ pub struct Capture {
     last_change: isize,
     current: Option<i64>,
     on_change: Box<dyn Fn() + Send>,
-    /// Watches the folder macOS saves screenshots in.
-    shots: Option<Watcher>,
-    shots_checked: Option<Instant>,
 }
 
 impl Capture {
@@ -49,15 +45,7 @@ impl Capture {
             Err(e) => eprintln!("copypasta: repair failed: {e:#}"),
             _ => {}
         }
-        let mut c = Capture {
-            store,
-            shared,
-            last_change: platform::change_count(),
-            current: None,
-            on_change,
-            shots: None,
-            shots_checked: None,
-        };
+        let mut c = Capture { store, shared, last_change: platform::change_count(), current: None, on_change };
         // Whatever is on the clipboard at startup: remember it without a copy event.
         if let Some(cap) = platform::read().to_captured() {
             c.current = c.store.upsert_clip(&cap, now_ms()).ok();
@@ -73,10 +61,11 @@ impl Capture {
                     self.poll();
                     self.on_paste(ts);
                 }
-                Err(RecvTimeoutError::Timeout) => {
+                Ok(Msg::File { cap, note, ts }) => {
+                    self.on_file(&cap, note, ts);
                     self.poll();
-                    self.poll_screenshots();
                 }
+                Err(RecvTimeoutError::Timeout) => self.poll(),
                 Err(RecvTimeoutError::Disconnected) => return,
             }
             if last_gc.elapsed() > Duration::from_secs(3600) {
@@ -142,49 +131,13 @@ impl Capture {
         }
     }
 
-    /// Record screenshots saved as files, one per tick. They are not on the
-    /// clipboard, so `current` (what a ⌘V pastes) stays as it is.
-    fn poll_screenshots(&mut self) {
-        if self.shots_checked.map(|t| t.elapsed() >= SCREENSHOT_DIR_CHECK).unwrap_or(true) {
-            self.shots_checked = Some(Instant::now());
-            let dir = platform::screenshot_dir();
-            if dir.as_deref() != self.shots.as_ref().map(Watcher::dir) {
-                if let Some(d) = &dir {
-                    eprintln!("copypasta: watching {} for screenshots", d.display());
-                }
-                // Not older than the newest one already recorded, or a day.
-                let newest = self.store.newest_file_clip().ok().flatten().map(|ms| ms + 1).unwrap_or(0);
-                let since = newest.max(now_ms() - SCREENSHOT_BACKFILL_MS).max(0) as u64;
-                self.shots = dir.map(|d| Watcher::new(d, UNIX_EPOCH + Duration::from_millis(since)));
-            }
-        }
-        let Some(watcher) = &mut self.shots else { return };
-        let Some(shot) = watcher.poll(platform::is_screen_capture) else { return };
-        let read = std::fs::read(&shot.path).map_err(anyhow::Error::from).and_then(|bytes| imaging::to_png(&bytes));
-        let img = match read {
-            Ok(img) => img,
-            Err(e) => {
-                let path = shot.path.clone();
-                if !watcher.retry(shot) {
-                    eprintln!("copypasta: can't read screenshot {}: {e:#}", path.display());
-                }
-                return;
-            }
-        };
-        let Shot { path, taken } = shot;
-        let cap = Captured {
-            kind: ClipKind::Image,
-            png: Some(img.png),
-            width: Some(img.width),
-            height: Some(img.height),
-            path: Some(path.to_string_lossy().into_owned()),
-            ..Default::default()
-        };
-        let ctx = Context { note: Some("Screenshot".into()), ..Default::default() };
-        let ts = taken.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_else(|_| now_ms());
-        match self.store.record_copy(&cap, &ctx, ts) {
+    /// Record a screenshot or download that showed up as a file. It is not
+    /// on the clipboard, so `current` (what a ⌘V pastes) stays as it is.
+    fn on_file(&mut self, cap: &Captured, note: &str, ts: i64) {
+        let ctx = Context { note: Some(note.into()), ..Default::default() };
+        match self.store.record_copy(cap, &ctx, ts) {
             Ok(_) => (self.on_change)(),
-            Err(e) => eprintln!("copypasta: record screenshot failed: {e:#}"),
+            Err(e) => eprintln!("copypasta: record {} failed: {e:#}", note.to_lowercase()),
         }
     }
 
@@ -217,6 +170,7 @@ fn looks_like_screenshot(types: &[String]) -> bool {
 /// Input Monitoring permission the tap is retried until it is granted.
 pub fn spawn(store: Store, shared: Arc<Shared>, on_change: Box<dyn Fn() + Send>) {
     let (tx, rx) = std::sync::mpsc::channel();
+    crate::folders::spawn(tx.clone());
     let tracking = platform::start_paste_tap(tx.clone());
     shared.paste_tracking.store(tracking, Ordering::Relaxed);
     eprintln!("copypasta: started; paste tracking {}", if tracking { "on" } else { "off" });

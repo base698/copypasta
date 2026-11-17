@@ -1,5 +1,6 @@
-//! Screenshots saved as files: recorded at the time they were taken, with
-//! the file they came from, and pasteable as a path.
+//! Clips read from files (saved screenshots, downloads): recorded at the
+//! time they were taken or arrived, with the file they came from, and
+//! pasteable as a path.
 
 use copypasta_core::{imaging, Captured, ClipKind, Context, Store};
 use std::path::{Path, PathBuf};
@@ -54,7 +55,8 @@ fn saved_screenshots_sit_among_clips_by_time_and_paste_as_paths() {
     assert_eq!(clip.path.as_deref(), Some(file.to_string_lossy().as_ref()));
     assert_eq!(clip.preview, "Image 40×30 · Screenshot 2026-01-02 at 3.04.05 PM.png");
     assert_eq!(s.search("screenshot 3.04", 10).unwrap().len(), 1, "found by file name");
-    assert_eq!(s.newest_file_clip().unwrap(), Some(2_000));
+    assert_eq!(s.newest_file_in(&dir).unwrap(), Some(2_000));
+    assert_eq!(s.newest_file_in(&dir.join("elsewhere")).unwrap(), None, "each folder has its own newest file");
 
     // The path to paste is the screenshot itself while it exists, then our copy.
     assert_eq!(s.files(&clip), [file.clone()]);
@@ -84,6 +86,30 @@ fn seeing_the_same_file_again_changes_nothing() {
     let (id, _) = s.record_copy(&copied, &taken(), 9_500).unwrap();
     let c = s.clip(id).unwrap().unwrap();
     assert_eq!(c.path, None);
-    assert_eq!(s.newest_file_clip().unwrap(), Some(5_000));
+    assert_eq!(s.newest_file_in(&dir).unwrap(), Some(5_000));
     assert_eq!(s.files(&c), [s.blob_path(&c).unwrap()]);
+}
+
+#[test]
+fn downloads_are_listed_by_path() {
+    let dir = tempdir();
+    let mut s = Store::open_at(&dir).unwrap();
+    let file = dir.join("quarterly report.pdf");
+    let path = file.to_string_lossy().into_owned();
+    let download = Captured { kind: ClipKind::File, text: Some(path.clone()), path: Some(path.clone()), ..Default::default() };
+    let arrived = Context { note: Some("Download".into()), ..Default::default() };
+    let (id, _) = s.record_copy(&download, &arrived, 1_000).unwrap();
+
+    let row = &s.search("quarterly", 10).unwrap()[0];
+    assert_eq!((row.clip.id, row.clip.kind, row.clip.preview.as_str()), (id, ClipKind::File, path.as_str()));
+    assert_eq!(row.sources[0].label, "Download");
+    assert_eq!(s.files(&row.clip), [file.clone()]);
+    assert_eq!(s.newest_file_in(&dir).unwrap(), Some(1_000));
+
+    // The same file copied in Finder later is the same clip, with both sources.
+    let copied = Captured { kind: ClipKind::File, text: Some(path), ..Default::default() };
+    let (again, _) = s.record_copy(&copied, &Context { app_name: Some("Finder".into()), ..Default::default() }, 2_000).unwrap();
+    assert_eq!(again, id);
+    let clip = s.clip(id).unwrap().unwrap();
+    assert_eq!((clip.copies, clip.last_seen, clip.path.as_deref()), (2, 2_000, file.to_str()));
 }

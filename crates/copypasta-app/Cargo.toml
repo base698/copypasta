@@ -1,18 +1,21 @@
 [package]
 name = "copypasta-app"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23.1"
-copypasta-core = { version = "0.3.0", path = "../copypasta-core" }
+copypasta-core = { version = "0.3.1", path = "../copypasta-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # custom-protocol makes this a production build. Without it Tauri builds in
 # dev mode, which embeds this folder's absolute path in the binary.
 tauri = { version = "2", features = ["custom-protocol"] }
 tauri-plugin-global-shortcut = "2"
+
+[dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [build-dependencies]
 tauri-build = "2"

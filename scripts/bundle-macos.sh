@@ -43,7 +43,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSAppleEventsUsageDescription</key><string>Copypasta asks your browser for the active tab's URL so it can show where you copied from and pasted into.</string>
   <key>NSDesktopFolderUsageDescription</key><string>Copypasta adds the screenshots you save here to your clipboard history.</string>
   <key>NSDocumentsFolderUsageDescription</key><string>Copypasta adds the screenshots you save here to your clipboard history.</string>
-  <key>NSDownloadsFolderUsageDescription</key><string>Copypasta adds the screenshots you save here to your clipboard history.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>Copypasta adds the files you download to your clipboard history.</string>
 </dict></plist>
 PLIST
 

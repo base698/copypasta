@@ -54,6 +54,7 @@ copypasta keeps that history and draws it as a DAG.
   - *is the same image as #5*: perceptual hash match.
   - *was copied out of claude after #5 was pasted there*: you pasted into an agent pane or a web chat assistant, then copied its answer.
 - **Images.** Screenshots, "Copy Image" from the browser, and image URLs, each with thumbnails. Screenshots count whether you copy them (⌃⇧⌘4) or save them (⇧⌘4): saved ones are picked up from your screenshot folder and listed at the time you took them, among your other clips. `⇧⌘⏎` pastes an image's file path instead of the image, which is what an agent in a terminal wants.
+- **Downloads.** Files that arrive in your Downloads folder are listed when they arrive, among your other clips: images up to 8 MB with their picture, everything else by its path alone. `⇧⌘⏎` pastes the path.
 - **herdr tab.** `copypasta tui` gives you the same search and lineage in a terminal pane.
 - **MCP server.** `copypasta mcp` lets agents ask *"where did this text come from?"*
 - **Private by default.** Everything stays in a local SQLite file:
@@ -97,7 +98,7 @@ macOS will ask for up to four:
 | **Accessibility** | Read the focused window's title, and synthesize ⌘V for "paste" from the panel |
 | **Input Monitoring** | A listen-only key tap that reacts *only* to ⌘V (and ⇧⌘V / ⌥⇧⌘V) to record paste destinations; no other keys are looked at or stored |
 | **Automation** (per browser) | Ask the browser for the active tab's URL and title |
-| **Files and Folders** (Desktop or Documents) | Read the screenshots you save there. Only asked if that is where macOS saves them; only files macOS marked as screenshots are read |
+| **Files and Folders** (Downloads; Desktop or Documents) | List the files you download and read the screenshots you save. Desktop or Documents is only asked for if that is where macOS saves screenshots, and only files macOS marked as screenshots are read there |
 
 Copying is recorded without any of them; you just get less context.
 

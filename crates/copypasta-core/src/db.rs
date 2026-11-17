@@ -203,9 +203,15 @@ impl Store {
         }
     }
 
-    /// When the newest clip read from a file was first seen.
-    pub fn newest_file_clip(&self) -> Result<Option<i64>> {
-        Ok(self.conn.query_row("SELECT MAX(first_seen) FROM clips WHERE path IS NOT NULL", [], |r| r.get(0))?)
+    /// When the newest clip read from a file in `dir` was first seen.
+    pub fn newest_file_in(&self, dir: &Path) -> Result<Option<i64>> {
+        let dir = dir.to_string_lossy();
+        let like = dir.trim_end_matches('/').replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        Ok(self.conn.query_row(
+            "SELECT MAX(first_seen) FROM clips WHERE path LIKE ?1 ESCAPE '\\'",
+            [format!("{like}/%")],
+            |r| r.get(0),
+        )?)
     }
 
     /// Store a copy event. Returns (clip_id, event_id).
