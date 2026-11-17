@@ -81,6 +81,8 @@ const MIGRATIONS: &[&str] = &[
       copies = (SELECT COUNT(*) FROM events WHERE clip_id = clips.id AND kind = 'copy'),
       pastes = (SELECT COUNT(*) FROM events WHERE clip_id = clips.id AND kind = 'paste');
     "#,
+    // 3: the file an image clip was read from (screenshots saved to disk).
+    "ALTER TABLE clips ADD COLUMN path TEXT;",
 ];
 
 /// A copy or paste of the same clip in the same place this soon after the
@@ -92,7 +94,7 @@ pub struct Store {
     blob_dir: PathBuf,
 }
 
-const CLIP_COLS: &str = "id, hash, kind, text, preview, blob, width, height, bytes, secret, first_seen, last_seen, copies, pastes, pinned";
+const CLIP_COLS: &str = "id, hash, kind, text, preview, blob, width, height, bytes, secret, first_seen, last_seen, copies, pastes, pinned, path";
 
 fn clip_from_row(r: &Row) -> rusqlite::Result<Clip> {
     Ok(Clip {
@@ -111,6 +113,7 @@ fn clip_from_row(r: &Row) -> rusqlite::Result<Clip> {
         copies: r.get(12)?,
         pastes: r.get(13)?,
         pinned: r.get::<_, i64>(14)? != 0,
+        path: r.get(15)?,
     })
 }
 
@@ -162,13 +165,14 @@ impl Store {
             tx.execute_batch(sql)?;
             tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
             tx.commit()?;
-            match i {
-                0 => self.regroup_all()?,
-                1 => {
-                    self.scrub_secrets()?;
-                }
-                _ => {}
-            }
+        }
+        // Data fixes that go with a migration run once the whole schema is
+        // in place: they read clips with the current columns.
+        if version < 1 {
+            self.regroup_all()?;
+        }
+        if version < 2 {
+            self.scrub_secrets()?;
         }
         Ok(())
     }
@@ -181,6 +185,29 @@ impl Store {
         std::fs::read(self.blob_path(clip)?).ok()
     }
 
+    /// Files on disk that hold this clip, for pasting a path instead of the
+    /// content: copied files themselves; for an image, the screenshot it was
+    /// read from while that still exists, otherwise our stored copy.
+    pub fn files(&self, clip: &Clip) -> Vec<PathBuf> {
+        match clip.kind {
+            ClipKind::File => clip.text.as_deref().unwrap_or("").lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect(),
+            ClipKind::Image => clip
+                .path
+                .as_ref()
+                .map(PathBuf::from)
+                .filter(|p| p.is_file())
+                .or_else(|| self.blob_path(clip).filter(|p| p.is_file()))
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// When the newest clip read from a file was first seen.
+    pub fn newest_file_clip(&self) -> Result<Option<i64>> {
+        Ok(self.conn.query_row("SELECT MAX(first_seen) FROM clips WHERE path IS NOT NULL", [], |r| r.get(0))?)
+    }
+
     /// Store a copy event. Returns (clip_id, event_id).
     pub fn record_copy(&mut self, cap: &Captured, ctx: &Context, ts: i64) -> Result<(i64, i64)> {
         let clip_id = self.upsert_clip(cap, ts)?;
@@ -188,7 +215,7 @@ impl Store {
             return Ok((clip_id, prev));
         }
         self.conn.execute(
-            "UPDATE clips SET copies = copies + 1, last_seen = ?2 WHERE id = ?1",
+            "UPDATE clips SET copies = copies + 1, last_seen = MAX(last_seen, ?2) WHERE id = ?1",
             params![clip_id, ts],
         )?;
         let event_id = self.insert_event(EventKind::Copy, clip_id, ctx, ts)?;
@@ -311,6 +338,9 @@ impl Store {
             .query_row("SELECT id FROM clips WHERE hash = ?1", [&hash], |r| r.get(0))
             .optional()?
         {
+            if let Some(path) = &cap.path {
+                self.conn.execute("UPDATE clips SET path = ?2 WHERE id = ?1", params![id, path])?;
+            }
             return Ok(id);
         }
         let mut text = cap.text.clone();
@@ -331,7 +361,13 @@ impl Store {
                     (Some(w), Some(h)) => format!(" {w}×{h}"),
                     _ => String::new(),
                 };
-                let src = text.as_deref().map(|u| format!(" · {}", context::truncate(u, 120))).unwrap_or_default();
+                // Where it came from: the page it was copied on, or the file's name.
+                let file = cap.path.as_deref().and_then(|p| Path::new(p).file_name()).map(|n| n.to_string_lossy());
+                let src = text
+                    .as_deref()
+                    .or(file.as_deref())
+                    .map(|s| format!(" · {}", context::truncate(s, 120)))
+                    .unwrap_or_default();
                 (format!("Image{dims}{src}"), text.clone())
             }
             _ if secret => (secrets::mask(text.as_deref().unwrap_or("")), None),
@@ -346,8 +382,8 @@ impl Store {
             None => (None, stored_text.as_ref().map(|t| t.len() as i64).unwrap_or(0), None),
         };
         self.conn.execute(
-            "INSERT INTO clips(hash, kind, text, preview, blob, width, height, bytes, dhash, secret, types, first_seen, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+            "INSERT INTO clips(hash, kind, text, preview, blob, width, height, bytes, dhash, secret, types, first_seen, last_seen, path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
             params![
                 hash,
                 cap.kind.as_str(),
@@ -360,7 +396,8 @@ impl Store {
                 dhash,
                 secret as i64,
                 serde_json::to_string(&cap.types)?,
-                ts
+                ts,
+                cap.path
             ],
         )?;
         Ok(self.conn.last_insert_rowid())

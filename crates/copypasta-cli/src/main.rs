@@ -6,6 +6,7 @@
 //!   copypasta groups [query…]     groups (herdr workspaces + your own) with counts
 //!   copypasta api <cmd> [json]    the panel's JSON API
 //!   copypasta trace <text|#id>    where did this text come from?
+//!   copypasta panel               open or close the app's panel (as ⌃⌘V does)
 //!   copypasta stats | gc
 
 mod demo;
@@ -18,7 +19,7 @@ use copypasta_core::{context::truncate, graph::fmt_ts, Store};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: copypasta <tui | mcp | search [query…] | groups [query…] | trace <text|#id|-> | api <cmd> [json] | stats | gc>\n\
+        "usage: copypasta <tui | mcp | panel | search [query…] | groups [query…] | trace <text|#id|-> | api <cmd> [json] | stats | gc>\n\
          search syntax: words match text and places; g:<name> filters by group, g:none = ungrouped\n\
          data: {}",
         copypasta_core::paths::data_dir().display()
@@ -78,6 +79,7 @@ fn main() -> Result<()> {
             println!("removed {n} clips");
             Ok(())
         }
+        "panel" => panel(),
         "demo" => demo::seed(),
         // The panel's JSON API: `copypasta api <cmd> ['{"json":"args"}']`.
         "api" => {
@@ -106,4 +108,23 @@ fn main() -> Result<()> {
         "-h" | "--help" | "help" => usage(),
         _ => usage(),
     }
+}
+
+/// Ask the running app to open or close its panel, as ⌃⌘V does. For
+/// binding to a key inside an app that handles its own shortcuts.
+#[cfg(target_os = "macos")]
+fn panel() -> Result<()> {
+    extern "C" {
+        fn notify_post(name: *const std::ffi::c_char) -> u32;
+    }
+    let name = std::ffi::CString::new(copypasta_core::PANEL_NOTIFICATION)?;
+    if unsafe { notify_post(name.as_ptr()) } != 0 {
+        anyhow::bail!("could not send the request to the Copypasta app");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn panel() -> Result<()> {
+    anyhow::bail!("the panel is only available on macOS")
 }

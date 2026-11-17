@@ -12,6 +12,7 @@ mod platform {
 mod capture;
 mod commands;
 mod herdr;
+mod shots;
 
 use capture::Shared;
 use copypasta_core::Store;
@@ -30,6 +31,13 @@ fn toggle_panel(app: &tauri::AppHandle) {
         hide_panel(app);
         return;
     }
+    // Whoever is in front now is where a paste from the panel will go.
+    #[cfg(target_os = "macos")]
+    if let Some(front) = mac::frontmost().and_then(|f| f.bundle_id).filter(|b| b != mac::OWN_BUNDLE) {
+        if let Some(state) = app.try_state::<AppState>() {
+            *state.shared.target_app.lock().unwrap() = Some(front);
+        }
+    }
     let _ = win.center();
     let _ = win.show();
     let _ = win.set_focus();
@@ -47,7 +55,8 @@ pub fn hide_panel(app: &tauri::AppHandle) {
 
 fn main() {
     let hotkey = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SUPER), Code::KeyV);
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut app = tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, sc, ev| {
@@ -59,7 +68,9 @@ fn main() {
         )
         .setup(move |app| {
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            if let Some(win) = app.get_webview_window("main") {
+                mac::show_over_full_screen(&win);
+            }
 
             let shared = Arc::new(Shared::default());
             let handle = app.handle().clone();
@@ -78,6 +89,13 @@ fn main() {
             }
             if let Err(e) = app.global_shortcut().register(hotkey) {
                 eprintln!("copypasta: could not register ⌃⌘V: {e}");
+            }
+            // `copypasta panel` does what the shortcut does, for apps whose
+            // own keys are easier to bind than a global one.
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle().clone();
+                mac::on_panel_request(move || toggle_panel(&handle));
             }
             if std::env::args().any(|a| a == "--show") {
                 toggle_panel(app.handle());
@@ -98,6 +116,13 @@ fn main() {
             commands::hide,
             commands::request_permissions,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running copypasta");
+        .build(tauri::generate_context!())
+        .expect("error while starting copypasta");
+    // Become a menu-bar-less accessory app before launch, not in `setup`:
+    // the panel window is created ahead of `setup`, and a window created
+    // while the app is still a regular one can never be shown over another
+    // app's full-screen Space, whatever is set on it later.
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    app.run(|_, _| {});
 }

@@ -1,6 +1,7 @@
 use crate::AppState;
 use copypasta_core::ClipKind;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::State;
 
@@ -18,24 +19,32 @@ pub fn api(state: State<AppState>, cmd: String, args: Option<serde_json::Value>)
 }
 
 /// Put a clip back on the clipboard; with `paste`, also paste it into the
-/// app that was in front before the panel opened.
+/// app that was in front before the panel opened. With `as_path`, a clip
+/// that has a file (a screenshot, any image, copied files) goes back as
+/// that file's path instead of its content.
 #[tauri::command]
-pub fn restore(app: tauri::AppHandle, state: State<AppState>, id: i64, paste: bool) -> Res<()> {
+pub fn restore(app: tauri::AppHandle, state: State<AppState>, id: i64, paste: bool, as_path: Option<bool>) -> Res<()> {
     let store = state.store.lock().unwrap();
     let clip = store.clip(id).map_err(err)?.ok_or("clip not found")?;
     if clip.secret {
         return Err("secret clips are not stored and cannot be restored".into());
     }
+    let files = if as_path.unwrap_or(false) { store.files(&clip) } else { Vec::new() };
     *state.shared.pending_restore.lock().unwrap() = Some(id);
     #[cfg(target_os = "macos")]
     {
         use copypasta_core::pasteboard;
-        let ok = match clip.kind {
-            ClipKind::Image => match store.read_blob(&clip) {
-                Some(png) => pasteboard::write_png(&png, clip.text.as_deref()),
-                None => false,
-            },
-            _ => pasteboard::write_text(clip.text.as_deref().unwrap_or("")),
+        let ok = if !files.is_empty() {
+            let target = state.shared.target_app.lock().unwrap();
+            pasteboard::write_text(&paths_text(&files, target.as_deref().is_some_and(crate::mac::is_terminal)))
+        } else {
+            match clip.kind {
+                ClipKind::Image => match store.read_blob(&clip) {
+                    Some(png) => pasteboard::write_png(&png, clip.text.as_deref()),
+                    None => false,
+                },
+                _ => pasteboard::write_text(clip.text.as_deref().unwrap_or("")),
+            }
         };
         if !ok {
             return Err("could not write to the clipboard".into());
@@ -51,6 +60,31 @@ pub fn restore(app: tauri::AppHandle, state: State<AppState>, id: i64, paste: bo
         });
     }
     Ok(())
+}
+
+/// Paths as text to paste. A terminal gets what dropping the files on it
+/// would type (backslash-quoted, space-separated), which is also the form
+/// agents such as Claude Code recognize as an attached image; other apps
+/// get the plain paths, one per line.
+fn paths_text(files: &[PathBuf], terminal: bool) -> String {
+    let paths = files.iter().map(|p| p.to_string_lossy());
+    if terminal {
+        paths.map(|p| shell_quote(&p)).collect::<Vec<_>>().join(" ")
+    } else {
+        paths.collect::<Vec<_>>().join("\n")
+    }
+}
+
+fn shell_quote(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 8);
+    for c in path.chars() {
+        // Non-ASCII (macOS puts U+202F in screenshot names) needs no quoting.
+        if c.is_ascii() && !c.is_ascii_alphanumeric() && !"/._-+=:,@%".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[derive(Serialize)]
@@ -83,5 +117,20 @@ pub fn request_permissions() {
     {
         crate::mac::accessibility_trusted(true);
         crate::mac::input_monitoring_granted(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_are_quoted_for_terminals_only() {
+        let files = [PathBuf::from("/Users/me/Documents/Screenshot 2026-01-02 at 3.04.05\u{202f}PM.png"), PathBuf::from("/tmp/it's (1).png")];
+        assert_eq!(
+            paths_text(&files, true),
+            "/Users/me/Documents/Screenshot\\ 2026-01-02\\ at\\ 3.04.05\u{202f}PM.png /tmp/it\\'s\\ \\(1\\).png"
+        );
+        assert_eq!(paths_text(&files, false), "/Users/me/Documents/Screenshot 2026-01-02 at 3.04.05\u{202f}PM.png\n/tmp/it's (1).png");
     }
 }

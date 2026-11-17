@@ -2,15 +2,20 @@
 //! frontmost window's context, and records pastes reported by the key tap.
 
 use crate::platform;
-use copypasta_core::{now_ms, Context, Store};
+use crate::shots::{Shot, Watcher};
+use copypasta_core::{imaging, now_ms, Captured, ClipKind, Context, Store};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 pub const RETENTION_MS: i64 = 30 * 86_400_000;
 pub const MAX_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(150);
+/// How far back saved screenshots are picked up the first time.
+const SCREENSHOT_BACKFILL_MS: i64 = 86_400_000;
+/// How often to check whether the screenshot folder setting changed.
+const SCREENSHOT_DIR_CHECK: Duration = Duration::from_secs(60);
 
 pub enum Msg {
     Paste { ts: i64 },
@@ -21,6 +26,9 @@ pub struct Shared {
     /// Clip the panel just put back on the clipboard.
     pub pending_restore: Mutex<Option<i64>>,
     pub paste_tracking: AtomicBool,
+    /// Bundle id of the app that was in front when the panel opened: where
+    /// a paste from the panel goes.
+    pub target_app: Mutex<Option<String>>,
 }
 
 pub struct Capture {
@@ -29,6 +37,9 @@ pub struct Capture {
     last_change: isize,
     current: Option<i64>,
     on_change: Box<dyn Fn() + Send>,
+    /// Watches the folder macOS saves screenshots in.
+    shots: Option<Watcher>,
+    shots_checked: Option<Instant>,
 }
 
 impl Capture {
@@ -38,7 +49,15 @@ impl Capture {
             Err(e) => eprintln!("copypasta: repair failed: {e:#}"),
             _ => {}
         }
-        let mut c = Capture { store, shared, last_change: platform::change_count(), current: None, on_change };
+        let mut c = Capture {
+            store,
+            shared,
+            last_change: platform::change_count(),
+            current: None,
+            on_change,
+            shots: None,
+            shots_checked: None,
+        };
         // Whatever is on the clipboard at startup: remember it without a copy event.
         if let Some(cap) = platform::read().to_captured() {
             c.current = c.store.upsert_clip(&cap, now_ms()).ok();
@@ -54,7 +73,10 @@ impl Capture {
                     self.poll();
                     self.on_paste(ts);
                 }
-                Err(RecvTimeoutError::Timeout) => self.poll(),
+                Err(RecvTimeoutError::Timeout) => {
+                    self.poll();
+                    self.poll_screenshots();
+                }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
             if last_gc.elapsed() > Duration::from_secs(3600) {
@@ -117,6 +139,52 @@ impl Capture {
                 (self.on_change)();
             }
             Err(e) => eprintln!("copypasta: record copy failed: {e:#}"),
+        }
+    }
+
+    /// Record screenshots saved as files, one per tick. They are not on the
+    /// clipboard, so `current` (what a ⌘V pastes) stays as it is.
+    fn poll_screenshots(&mut self) {
+        if self.shots_checked.map(|t| t.elapsed() >= SCREENSHOT_DIR_CHECK).unwrap_or(true) {
+            self.shots_checked = Some(Instant::now());
+            let dir = platform::screenshot_dir();
+            if dir.as_deref() != self.shots.as_ref().map(Watcher::dir) {
+                if let Some(d) = &dir {
+                    eprintln!("copypasta: watching {} for screenshots", d.display());
+                }
+                // Not older than the newest one already recorded, or a day.
+                let newest = self.store.newest_file_clip().ok().flatten().map(|ms| ms + 1).unwrap_or(0);
+                let since = newest.max(now_ms() - SCREENSHOT_BACKFILL_MS).max(0) as u64;
+                self.shots = dir.map(|d| Watcher::new(d, UNIX_EPOCH + Duration::from_millis(since)));
+            }
+        }
+        let Some(watcher) = &mut self.shots else { return };
+        let Some(shot) = watcher.poll(platform::is_screen_capture) else { return };
+        let read = std::fs::read(&shot.path).map_err(anyhow::Error::from).and_then(|bytes| imaging::to_png(&bytes));
+        let img = match read {
+            Ok(img) => img,
+            Err(e) => {
+                let path = shot.path.clone();
+                if !watcher.retry(shot) {
+                    eprintln!("copypasta: can't read screenshot {}: {e:#}", path.display());
+                }
+                return;
+            }
+        };
+        let Shot { path, taken } = shot;
+        let cap = Captured {
+            kind: ClipKind::Image,
+            png: Some(img.png),
+            width: Some(img.width),
+            height: Some(img.height),
+            path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let ctx = Context { note: Some("Screenshot".into()), ..Default::default() };
+        let ts = taken.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_else(|_| now_ms());
+        match self.store.record_copy(&cap, &ctx, ts) {
+            Ok(_) => (self.on_change)(),
+            Err(e) => eprintln!("copypasta: record screenshot failed: {e:#}"),
         }
     }
 

@@ -64,7 +64,10 @@ fn secrets_are_masked_and_gc() {
 }
 
 fn tempdir() -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("copypasta-test-{}-{}", std::process::id(), rand()));
+    // Tests run in parallel and the clock is coarse: number the folders too.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("copypasta-test-{}-{}-{i}", std::process::id(), rand()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

@@ -291,7 +291,8 @@ async function showClip(r) {
   if (seq !== detailSeq) return;
   let content;
   if (r.kind === "image") {
-    content = `${img ? `<img src="${img}" alt="">` : "Image unavailable"}<div class="src">${esc(r.width)}×${esc(r.height)}${r.text ? " · " + esc(r.text) : ""}</div>`;
+    const file = r.path ? " · " + esc(r.path.replace(/^\/Users\/[^/]+/, "~")) : "";
+    content = `${img ? `<img src="${img}" alt="">` : "Image unavailable"}<div class="src">${esc(r.width)}×${esc(r.height)}${r.text ? " · " + esc(r.text) : ""}${file}</div>`;
   } else if (r.kind === "url" && /\.(png|jpe?g|gif|webp|svg)(\?|$)/i.test(r.text || "")) {
     content = `<img src="${esc(r.text)}" alt=""><div class="src">${esc(r.text)}</div>`;
   } else {
@@ -304,6 +305,7 @@ async function showClip(r) {
     <div class="actions">
       <button class="primary" data-act="copy" ${r.secret ? "disabled" : ""}>Copy ⏎</button>
       <button data-act="paste" ${r.secret ? "disabled" : ""}>Paste ⌘⏎</button>
+      ${r.kind === "image" || r.kind === "file" ? '<button data-act="path" title="Paste the path of the file instead of the image">Paste path ⇧⌘⏎</button>' : ""}
       <button data-act="pin">${r.pinned ? "Unpin" : "Pin"}</button>
       <button data-act="delete">Delete</button>
       <span class="facts">${esc(facts)}</span>
@@ -425,9 +427,10 @@ async function act(what) {
     return;
   }
   const r = e.row;
-  if (what === "copy" || what === "paste") {
+  if (what === "copy" || what === "paste" || what === "path") {
     try {
-      await invoke("restore", { id: r.id, paste: what === "paste" });
+      // "path" pastes the clip's file path where it has one (images, files).
+      await invoke("restore", { id: r.id, paste: what !== "copy", asPath: what === "path" });
     } catch (err) {
       flash(String(err));
     }
@@ -515,7 +518,7 @@ document.addEventListener("keydown", (e) => {
     } else if (openKeys.has(cur.key)) {
       toggle(cur.key, false);
     }
-  } else if (e.key === "Enter") { e.preventDefault(); act(e.metaKey ? "paste" : "copy"); }
+  } else if (e.key === "Enter") { e.preventDefault(); act(e.metaKey ? (e.shiftKey ? "path" : "paste") : "copy"); }
   else if (e.key === "Escape") {
     e.preventDefault();
     if ($q.value) { $q.value = ""; refresh({ keep: false }); } else invoke("hide");

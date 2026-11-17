@@ -46,14 +46,14 @@ copypasta keeps that history and draws it as a DAG.
 - **Rich context** for every copy and paste:
   - **Browsers:** the tab URL and title (Chrome, Brave, Edge, Arc, Safari; Firefox gets the window title only).
   - **Slack (web):** the channel or DM and the workspace.
-  - **herdr:** the workspace, tab, pane, agent (claude, codex, …), agent session, cwd and pane title.
+  - **herdr:** the workspace, tab, pane, agent (claude, codex, …), agent session, cwd and pane title. This covers herdr in a terminal and the Herdr app, whose spaces count as workspaces.
   - **Everything else:** the app and window title.
 - **Lineage.** The clip and every clip related to it, oldest first. Each card lists where that clip was copied from and pasted into (repeats in one place shown as ×N), and says how it relates to an earlier clip:
   - *includes #5* or *is part of #5*: one contains the other's text.
   - *is an edited version of #5*: near-identical text (also marked `edit of #5` in the list).
   - *is the same image as #5*: perceptual hash match.
   - *was copied out of claude after #5 was pasted there*: you pasted into an agent pane or a web chat assistant, then copied its answer.
-- **Images.** Region screenshots (⌃⇧⌘4), "Copy Image" from the browser, and image URLs, each with thumbnails.
+- **Images.** Screenshots, "Copy Image" from the browser, and image URLs, each with thumbnails. Screenshots count whether you copy them (⌃⇧⌘4) or save them (⇧⌘4): saved ones are picked up from your screenshot folder and listed at the time you took them, among your other clips. `⇧⌘⏎` pastes an image's file path instead of the image, which is what an agent in a terminal wants.
 - **herdr tab.** `copypasta tui` gives you the same search and lineage in a terminal pane.
 - **MCP server.** `copypasta mcp` lets agents ask *"where did this text come from?"*
 - **Private by default.** Everything stays in a local SQLite file:
@@ -90,13 +90,14 @@ The script puts the app in `~/Applications/Copypasta.app` and the CLI in `~/.loc
 
 ### Permissions
 
-macOS will ask for three:
+macOS will ask for up to four:
 
 | Permission | Why |
 | --- | --- |
 | **Accessibility** | Read the focused window's title, and synthesize ⌘V for "paste" from the panel |
 | **Input Monitoring** | A listen-only key tap that reacts *only* to ⌘V (and ⇧⌘V / ⌥⇧⌘V) to record paste destinations; no other keys are looked at or stored |
 | **Automation** (per browser) | Ask the browser for the active tab's URL and title |
+| **Files and Folders** (Desktop or Documents) | Read the screenshots you save there. Only asked if that is where macOS saves them; only files macOS marked as screenshots are read |
 
 Copying is recorded without any of them; you just get less context.
 
@@ -109,6 +110,7 @@ Copying is recorded without any of them; you just get less context.
 | `↑` `↓` / click | select; the right side shows the clip and its path |
 | `⏎` | put the clip back on the clipboard |
 | `⌘⏎` | …and paste it into the previous window |
+| `⇧⌘⏎` | paste the clip's file path instead: the screenshot file, a stored copy for other images, the paths of copied files. Quoted the way a dropped file is when the previous window is a terminal |
 | `←` `→` | collapse / expand a group (or jump from a clip to its group) |
 | `⌘G` | move the selected clip to another group |
 | `⌘P` / `⌘⌫` | pin / delete |
@@ -136,6 +138,8 @@ copypasta tui
 ```
 
 Type to search (`g:name` works here too), `tab`/`shift-tab` to cycle groups, `↑↓` to select (more clips load as you go), `⏎` to copy, `^D`/`^E` to scroll the lineage, `esc` to clear or quit.
+
+`copypasta panel` opens or closes the app's panel, exactly as ⌃⌘V does. Bind it to a key in herdr (or anything else that runs commands) if you would rather open the panel from there.
 
 ### For agents (MCP)
 
@@ -182,7 +186,7 @@ flowchart LR
 - **Groups**: a clip gets one group, automatic or manual. "Incoming" isn't stored; it's computed from paste events into a workspace.
 - **Upgrades**: schema changes run as numbered migrations, and 0.1 databases are upgraded and regrouped on first launch.
 - **Links** always point from an older clip to a newer one, so the graph is acyclic by construction. *Content links* compare a new clip with recent ones: containment, word 3-gram Jaccard ≥ 0.5, or image dHash distance ≤ 5. *Answer links* connect the last paste into an assistant with a copy out of that same place within 30 minutes.
-- **herdr context** comes from `herdr api snapshot`, which takes about 8 ms, whenever a terminal is frontmost and a herdr client is attached.
+- **herdr context** comes from `herdr api snapshot`, which takes about 8 ms, whenever a terminal is frontmost and a herdr client is attached. When the Herdr app is frontmost it comes from the app's own `status` and `ls` plus `hc get` for the terminal's folder, about 10 ms each.
 
 ```
 crates/

@@ -21,8 +21,11 @@ fn chrome() -> Context {
     Context { app_name: Some("Google Chrome".into()), url: Some("https://docs.rs/x".into()), ..Default::default() }
 }
 fn tempdir() -> std::path::PathBuf {
+    // Tests run in parallel and the clock is coarse: number the folders too.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let d = std::env::temp_dir().join(format!("copypasta-groups-{}-{n}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("copypasta-groups-{}-{n}-{i}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -195,7 +198,7 @@ fn migrates_a_v1_database() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
     // Repeats collapsed (two instances / double writes), real repeats kept.
     let c2 = s.clip(2).unwrap().unwrap();
     assert_eq!((c2.copies, c2.pastes), (1, 2));

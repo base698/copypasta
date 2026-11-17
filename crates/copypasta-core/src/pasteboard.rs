@@ -122,6 +122,7 @@ impl Snapshot {
                         height: Some(img.height),
                         png: Some(img.png),
                         types,
+                        path: None,
                     });
                 }
             }

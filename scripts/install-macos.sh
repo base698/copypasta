@@ -10,6 +10,9 @@ BIN_DIR="$HOME/.local/bin"
 LABEL="dev.base698.copypasta"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
+# Keep this machine's home folder (and so the user name) out of the binaries:
+# they carry the source paths of dependencies under ~/.cargo.
+export RUSTFLAGS="--remap-path-prefix=$HOME=~ ${RUSTFLAGS:-}"
 cargo build --release -p copypasta-app -p copypasta
 scripts/bundle-macos.sh "$APP"
 
