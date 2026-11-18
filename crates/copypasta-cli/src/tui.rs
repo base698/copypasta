@@ -20,8 +20,8 @@ struct App {
     detail_for: Option<i64>,
     status: String,
     scroll: u16,
-    /// Group filter: None = all, Some(i) = groups[i].
-    group: Option<usize>,
+    /// Filter: 0 = all, 1 = pinned, n = groups[n - 2].
+    view: usize,
     groups: Vec<GroupSummary>,
     has_more: bool,
 }
@@ -42,8 +42,8 @@ impl App {
     fn reload(&mut self) {
         let keep = self.selected().map(|r| r.clip.id);
         self.groups = self.store.group_summaries(&self.query).unwrap_or_default();
-        if self.group.is_some_and(|g| g >= self.groups.len()) {
-            self.group = None;
+        if self.view >= self.groups.len() + 2 {
+            self.view = 0;
         }
         // Keep however many pages were already loaded.
         let limit = self.rows.len().max(PAGE).div_ceil(PAGE) * PAGE;
@@ -55,9 +55,13 @@ impl App {
     }
 
     fn q(&self, offset: usize, limit: usize) -> Query {
-        let group = match self.group.and_then(|i| self.groups.get(i)) {
-            None => GroupSel::All,
-            Some(g) => g.id.map(GroupSel::Id).unwrap_or(GroupSel::Ungrouped),
+        let group = match self.view {
+            0 => GroupSel::All,
+            1 => GroupSel::Pinned,
+            n => match self.groups.get(n - 2) {
+                None => GroupSel::All,
+                Some(g) => g.id.map(GroupSel::Id).unwrap_or(GroupSel::Ungrouped),
+            },
         };
         Query { text: self.query.clone(), group, offset, limit }
     }
@@ -72,19 +76,18 @@ impl App {
     }
 
     fn cycle_group(&mut self, delta: isize) {
-        let n = self.groups.len() as isize + 1; // + "all"
-        let cur = self.group.map(|g| g as isize + 1).unwrap_or(0);
-        let next = (cur + delta).rem_euclid(n);
-        self.group = if next == 0 { None } else { Some(next as usize - 1) };
+        let n = self.groups.len() as isize + 2; // + "all", "pinned"
+        self.view = (self.view as isize + delta).rem_euclid(n) as usize;
         self.rows.clear();
         self.list.select(Some(0));
         self.reload();
     }
 
     fn group_label(&self) -> String {
-        match self.group.and_then(|i| self.groups.get(i)) {
-            None => "all groups".into(),
-            Some(g) => g.name.clone(),
+        match self.view {
+            0 => "all groups".into(),
+            1 => "★ pinned".into(),
+            n => self.groups.get(n - 2).map(|g| g.name.clone()).unwrap_or_default(),
         }
     }
 
@@ -139,6 +142,16 @@ impl App {
         self.refresh_detail(false);
     }
 
+    fn toggle_pin(&mut self) {
+        let Some((id, pinned)) = self.selected().map(|r| (r.clip.id, r.clip.pinned)) else { return };
+        self.status = match self.store.set_pinned(id, !pinned) {
+            Ok(()) => format!("{} #{id}", if pinned { "unpinned" } else { "pinned" }),
+            Err(e) => format!("pin failed: {e}"),
+        };
+        self.reload();
+        self.refresh_detail(true);
+    }
+
     fn copy_selected(&mut self) {
         let Some(r) = self.selected().cloned() else { return };
         if r.clip.secret {
@@ -175,7 +188,7 @@ pub fn run() -> Result<()> {
         detail_for: None,
         status: String::new(),
         scroll: 0,
-        group: None,
+        view: 0,
         groups: vec![],
         has_more: false,
     };
@@ -204,6 +217,7 @@ pub fn run() -> Result<()> {
                     KeyCode::Char('p') if ctrl => app.move_sel(-1),
                     KeyCode::Char('d') if ctrl => app.scroll = app.scroll.saturating_add(10),
                     KeyCode::Char('e') if ctrl => app.scroll = app.scroll.saturating_sub(10),
+                    KeyCode::Char('s') if ctrl => app.toggle_pin(),
                     KeyCode::Tab => app.cycle_group(1),
                     KeyCode::BackTab => app.cycle_group(-1),
                     KeyCode::Down => app.move_sel(1),
@@ -270,6 +284,9 @@ fn draw(f: &mut Frame, app: &mut App) {
                 ClipKind::Text => "¶",
             };
             let mut places = vec![];
+            if r.clip.pinned {
+                places.push(Span::styled("★ ", Style::default().fg(Color::Yellow)));
+            }
             if let Some(g) = &r.group {
                 let tag = if r.incoming { format!("⇢{} ", truncate(&g.name, 14)) } else { format!("[{}] ", truncate(&g.name, 14)) };
                 places.push(Span::styled(tag, Style::default().fg(Color::Cyan)));
@@ -305,7 +322,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(detail, body[1]);
 
     let help = if app.status.is_empty() {
-        "type to search (g:name) · tab group · ↑↓ select · ⏎ copy · ^D/^E scroll lineage · esc clear/quit".to_string()
+        "type to search (g:name, is:pinned) · tab group/pinned · ↑↓ select · ⏎ copy · ^S pin · ^D/^E scroll lineage · esc clear/quit".to_string()
     } else {
         app.status.clone()
     };

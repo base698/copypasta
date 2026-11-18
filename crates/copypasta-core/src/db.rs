@@ -466,6 +466,7 @@ impl Store {
         match &q.group {
             GroupSel::All => {}
             GroupSel::Ungrouped => sql.push_str(" AND c.group_id IS NULL"),
+            GroupSel::Pinned => sql.push_str(" AND c.pinned != 0"),
             GroupSel::Id(g) => {
                 let ws = self.group(*g)?.and_then(|g| g.workspace);
                 args.push(g.to_string());
@@ -499,14 +500,16 @@ impl Store {
     }
 
     /// SQL condition over `c` (clips) for a search string: FTS terms plus
-    /// `group:name` / `g:name` / `g:none` filters.
+    /// `group:name` / `g:name` / `g:none` filters and `is:pinned`.
     pub(crate) fn filter(&self, text: &str) -> Result<Filter> {
         let mut sql = String::from("1=1");
         let mut args: Vec<String> = Vec::new();
         let mut terms: Vec<&str> = Vec::new();
         for t in text.split_whitespace() {
             let lower = t.to_lowercase();
-            if let Some(name) = lower.strip_prefix("group:").or_else(|| lower.strip_prefix("g:")) {
+            if lower == "is:pinned" || lower == "is:starred" {
+                sql.push_str(" AND c.pinned != 0");
+            } else if let Some(name) = lower.strip_prefix("group:").or_else(|| lower.strip_prefix("g:")) {
                 if name == "none" || name == "ungrouped" {
                     sql.push_str(" AND c.group_id IS NULL");
                 } else {

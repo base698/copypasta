@@ -6,6 +6,7 @@
 //!   copypasta groups [query…]     groups (herdr workspaces + your own) with counts
 //!   copypasta api <cmd> [json]    the panel's JSON API
 //!   copypasta trace <text|#id>    where did this text come from?
+//!   copypasta pin|unpin <#id>     pin a clip (kept forever, listed under Pinned)
 //!   copypasta panel               open or close the app's panel (as ⌃⌘V does)
 //!   copypasta stats | gc
 
@@ -19,8 +20,8 @@ use copypasta_core::{context::truncate, graph::fmt_ts, Store};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: copypasta <tui | mcp | panel | search [query…] | groups [query…] | trace <text|#id|-> | api <cmd> [json] | stats | gc>\n\
-         search syntax: words match text and places; g:<name> filters by group, g:none = ungrouped\n\
+        "usage: copypasta <tui | mcp | panel | search [query…] | groups [query…] | trace <text|#id|-> | pin <#id> | unpin <#id> | api <cmd> [json] | stats | gc>\n\
+         search syntax: words match text and places; g:<name> filters by group, g:none = ungrouped, is:pinned = pinned only\n\
          data: {}",
         copypasta_core::paths::data_dir().display()
     );
@@ -40,8 +41,9 @@ fn main() -> Result<()> {
                 let src = r.sources.first().map(|p| p.label.as_str()).unwrap_or("?");
                 let dst: Vec<&str> = r.destinations.iter().take(3).map(|p| p.label.as_str()).collect();
                 println!(
-                    "#{:<5} {}  {}{}\n       from {}{}",
+                    "#{:<5} {}{}  {}{}\n       from {}{}",
                     r.clip.id,
+                    if r.clip.pinned { "★ " } else { "" },
                     fmt_ts(r.clip.last_seen),
                     truncate(&r.clip.preview, 90),
                     r.group.as_ref().map(|g| format!("  [{}]", g.name)).unwrap_or_default(),
@@ -62,6 +64,16 @@ fn main() -> Result<()> {
             };
             let store = Store::open()?;
             println!("{}", trace::trace(&store, &input)?);
+            Ok(())
+        }
+        "pin" | "unpin" => {
+            let id: i64 = rest.trim().trim_start_matches('#').parse().unwrap_or_else(|_| usage());
+            let mut store = Store::open()?;
+            if store.clip(id)?.is_none() {
+                anyhow::bail!("no clip #{id}");
+            }
+            store.set_pinned(id, cmd == "pin")?;
+            println!("{} #{id}", if cmd == "pin" { "pinned" } else { "unpinned" });
             Ok(())
         }
         "stats" => {

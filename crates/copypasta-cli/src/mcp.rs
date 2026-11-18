@@ -22,7 +22,7 @@ fn tools() -> Value {
         },
         {
             "name": "clipboard_search",
-            "description": "Search the user's clipboard history (last 30 days). Matches clip text and the places it was copied from / pasted into, e.g. 'slack dev', 'docs.rs', 'herdr claude'. Add g:<name> to limit to a group (herdr workspaces are groups automatically; g:none = ungrouped). Empty query lists the most recent clips. Page with offset.",
+            "description": "Search the user's clipboard history (last 30 days). Matches clip text and the places it was copied from / pasted into, e.g. 'slack dev', 'docs.rs', 'herdr claude'. Add g:<name> to limit to a group (herdr workspaces are groups automatically; g:none = ungrouped), or is:pinned for clips the user pinned. Empty query lists the most recent clips. Page with offset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -63,9 +63,10 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<String> {
                 let src: Vec<&str> = r.sources.iter().take(2).map(|p| p.label.as_str()).collect();
                 let dst: Vec<&str> = r.destinations.iter().take(4).map(|p| p.label.as_str()).collect();
                 out.push_str(&format!(
-                    "#{} [{}]{} {} — {}\n  from: {}\n  into: {}\n",
+                    "#{} [{}]{}{} {} — {}\n  from: {}\n  into: {}\n",
                     r.clip.id,
                     r.clip.kind.as_str(),
+                    if r.clip.pinned { " pinned" } else { "" },
                     r.group.as_ref().map(|g| format!(" group={}", g.name)).unwrap_or_default(),
                     fmt_ts(r.clip.last_seen),
                     truncate(&r.clip.preview, 200),

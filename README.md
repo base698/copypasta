@@ -114,8 +114,12 @@ Copying is recorded without any of them; you just get less context.
 | `⇧⌘⏎` | paste the clip's file path instead: the screenshot file, a stored copy for other images, the paths of copied files. Quoted the way a dropped file is when the previous window is a terminal |
 | `←` `→` | collapse / expand a group (or jump from a clip to its group) |
 | `⌘G` | move the selected clip to another group |
-| `⌘P` / `⌘⌫` | pin / delete |
+| `⌘P` / `⌘⌫` | pin / delete (or click the ☆ on a row, or drag a clip onto **Pinned**) |
 | click a dashed node | jump to that related clip |
+
+### Pinned
+
+Pinned clips (★) are listed together in a **Pinned** section at the top of the list, across all groups, and also stay at the top of their own group. Old-history cleanup never removes them. Search `is:pinned` to show only pinned clips; it combines with words and `g:name`. Opening the panel still selects your newest clip, not a pin.
 
 ### Groups
 
@@ -138,7 +142,7 @@ herdr tab create --label clips   # then, in the new pane:
 copypasta tui
 ```
 
-Type to search (`g:name` works here too), `tab`/`shift-tab` to cycle groups, `↑↓` to select (more clips load as you go), `⏎` to copy, `^D`/`^E` to scroll the lineage, `esc` to clear or quit.
+Type to search (`g:name` works here too), `tab`/`shift-tab` to cycle groups (and the pinned view), `^S` to pin or unpin, `↑↓` to select (more clips load as you go), `⏎` to copy, `^D`/`^E` to scroll the lineage, `esc` to clear or quit.
 
 `copypasta panel` opens or closes the app's panel, exactly as ⌃⌘V does. Bind it to a key in herdr (or anything else that runs commands) if you would rather open the panel from there.
 
@@ -151,7 +155,7 @@ claude mcp add -s user copypasta -- ~/.local/bin/copypasta mcp
 | Tool | |
 | --- | --- |
 | `clipboard_trace` | `{text}` or `{clip_id}` → where it was copied from, where it was pasted, and related clips |
-| `clipboard_search` | `{query, limit, offset}` → matching clips with group, sources and destinations (`g:name` filters) |
+| `clipboard_search` | `{query, limit, offset}` → matching clips with group, sources and destinations (`g:name`, `is:pinned` filter) |
 | `clipboard_groups` | `{query}` → groups (herdr workspaces and your own) with counts and incoming pastes |
 
 ### CLI
@@ -160,6 +164,7 @@ claude mcp add -s user copypasta -- ~/.local/bin/copypasta mcp
 copypasta search slack eng        # recent clips matching every term
 copypasta groups                  # groups with clip and incoming counts
 copypasta search g:api limiter    # within one group
+copypasta pin 42 | unpin 42       # pin a clip (kept forever); copypasta search is:pinned lists them
 copypasta trace "ok_or(LimitError"
 pbpaste | copypasta trace -       # where did what's on my clipboard come from?
 copypasta stats | gc | demo       # demo seeds a sample history into $COPYPASTA_HOME

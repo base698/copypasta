@@ -19,6 +19,8 @@ let allGroups = [];       // every group, for the "move to" menu
 const lists = new Map();  // group key -> { rows, done, loading }
 let openKeys = new Set(); // expanded group keys
 let expanded = loadExpanded(); // remembered expansion when not searching
+let pinnedClosed = loadFlag("copypasta.pinnedClosed");
+let pinnedGroup = null;   // the "Pinned" section: pinned clips from every group
 let entries = [];         // visible rows: {t:"g", key, g} | {t:"c", key, row}
 let sel = 0;
 let cursor = null;        // {t, key, id?} — survives re-renders
@@ -29,8 +31,8 @@ const thumbs = new Map();
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fit = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
-const gkey = (g) => (g.id == null ? "none" : String(g.id));
-const gsel = (key) => (key === "none" ? "none" : Number(key));
+const gkey = (g) => (g.pinned ? "pinned" : g.id == null ? "none" : String(g.id));
+const gsel = (key) => (key === "none" || key === "pinned" ? key : Number(key));
 const searching = () => query.split(/\s+/).some((t) => t && !/^(g|group):/i.test(t));
 
 function ago(ms) {
@@ -52,9 +54,21 @@ function loadExpanded() {
     return null;
   }
 }
+function loadFlag(k) {
+  try {
+    return localStorage.getItem(k) === "1";
+  } catch {
+    return false;
+  }
+}
+function saveFlag(k, on) {
+  try {
+    localStorage.setItem(k, on ? "1" : "0");
+  } catch {}
+}
 function saveExpanded() {
   if (searching()) return;
-  expanded = new Set(openKeys);
+  expanded = new Set([...openKeys].filter((k) => k !== "pinned"));
   try {
     localStorage.setItem("copypasta.expanded", JSON.stringify([...expanded]));
   } catch {}
@@ -65,25 +79,35 @@ function saveExpanded() {
 async function refresh({ keep = true } = {}) {
   query = $q.value.trim();
   const seq = ++refreshSeq;
-  let gs, all;
+  let gs, all, pins;
   try {
-    [gs, all] = await Promise.all([call("groups", { query }), call("all_groups")]);
+    [gs, all, pins] = await Promise.all([
+      call("groups", { query }),
+      call("all_groups"),
+      call("search", { query, group: "pinned", limit: 500 }),
+    ]);
   } catch (e) {
     console.error(e);
     gs = [];
     all = [];
+    pins = [];
   }
   if (seq !== refreshSeq) return;
   groups = gs;
   allGroups = all;
+  pinnedGroup = pins.length
+    ? { pinned: true, id: null, name: "Pinned", count: pins.length, incoming: 0, last_seen: Math.max(...pins.map((r) => r.last_seen)) }
+    : null;
   const keys = new Set(groups.map(gkey));
   if (searching() || /(^|\s)(g|group):/i.test(query)) {
     openKeys = new Set(groups.filter((g) => g.count + g.incoming > 0).map(gkey));
   } else {
     openKeys = new Set([...(expanded ?? new Set(groups.slice(0, 1).map(gkey)))].filter((k) => keys.has(k)));
   }
+  if (pinnedGroup && (searching() || !pinnedClosed)) openKeys.add("pinned");
   const prev = new Map(lists);
   lists.clear();
+  lists.set("pinned", { rows: pins, done: true, loading: false });
   await Promise.all(
     [...openKeys].map((k) => loadPage(k, keep ? Math.max(PAGE, prev.get(k)?.rows.length ?? 0) : PAGE)),
   );
@@ -127,6 +151,14 @@ function chip(place, dst, g) {
 }
 
 function groupHeader(g, open, i) {
+  if (g.pinned) {
+    return `<li class="group pinned${open ? " open" : ""}" data-i="${i}" data-key="pinned">
+    <span class="chev">${open ? "▾" : "▸"}</span>
+    <span class="gname"><span class="pin">★</span> Pinned</span>
+    <span class="gcount">${g.count}</span>
+    <span class="time"></span>
+  </li>`;
+  }
   const tag = g.workspace ? `<span class="gtag" title="herdr workspace ${esc(g.workspace)}">herdr</span>` : "";
   const inc = g.incoming ? `<span class="gin" title="pasted in from other groups">+${g.incoming} in</span>` : "";
   return `<li class="group${open ? " open" : ""}" data-i="${i}" data-key="${gkey(g)}">
@@ -143,7 +175,9 @@ function clipRow(r, g, i) {
   const dst = r.destinations.slice(0, 2).map((p) => chip(p, true, g)).join("");
   const more = r.destinations.length > 2 ? `<span class="chip dst">+${r.destinations.length - 2}</span>` : "";
   let cross = "";
-  if (r.incoming) {
+  if (g.pinned) {
+    cross = `<span class="chip grp" title="in group ${esc(r.group?.name ?? "none")}">${esc(r.group?.name ?? "ungrouped")}</span>`;
+  } else if (r.incoming) {
     cross = `<span class="chip in" title="belongs to ${esc(r.group?.name ?? "no group")}; pasted into this workspace">⇢ from ${esc(r.group?.name ?? "ungrouped")}</span>`;
   } else {
     const others = r.workspaces.filter((w) => w !== g.workspace);
@@ -155,7 +189,7 @@ function clipRow(r, g, i) {
     ${badge}
     <div class="body">
       <div class="preview${mono ? " mono" : ""}">${esc(r.preview)}</div>
-      <div class="meta">${r.pinned ? '<span class="pin">★</span>' : ""}${cross}${src}${dst}${more}<span class="time">${ago(r.last_seen)}</span></div>
+      <div class="meta"><button class="star${r.pinned ? " on" : ""}" data-star="${r.id}" title="${r.pinned ? "Unpin" : "Pin"} (⌘P)" tabindex="-1">${r.pinned ? "★" : "☆"}</button>${cross}${src}${dst}${more}<span class="time">${ago(r.last_seen)}</span></div>
     </div></li>`;
 }
 
@@ -163,7 +197,7 @@ let moreObserver = null;
 function render() {
   entries = [];
   let html = "";
-  for (const g of groups) {
+  for (const g of pinnedGroup ? [pinnedGroup, ...groups] : groups) {
     const key = gkey(g);
     const open = openKeys.has(key);
     entries.push({ t: "g", key, g });
@@ -175,7 +209,7 @@ function render() {
       html += clipRow(r, g, entries.length - 1);
     }
     if (l && !l.done) html += `<li class="more" data-more="${key}">Loading more…</li>`;
-    else if (l && !l.rows.length) html += `<li class="hint">${g.id == null ? "Nothing ungrouped." : "Empty. Drag clips here."}</li>`;
+    else if (l && !l.rows.length && !g.pinned) html += `<li class="hint">${g.id == null ? "Nothing ungrouped." : "Empty. Drag clips here."}</li>`;
   }
   if (!groups.length) html = `<li class="hint">${query ? "No matches." : "No clips yet. Copy something."}</li>`;
   const top = $list.scrollTop;
@@ -201,6 +235,8 @@ function render() {
     if (i < 0 && cursor.t === "c") i = entries.findIndex((e) => e.t === "c" && e.row.id === cursor.id);
     if (i < 0 && cursor.t === "c") i = entries.findIndex((e) => e.t === "g" && e.key === cursor.key);
   }
+  // Default to the newest clip, not a pin: open-and-⏎ should get what you just copied.
+  if (i < 0) i = entries.findIndex((e) => e.t === "c" && e.key !== "pinned");
   if (i < 0) i = entries.findIndex((e) => e.t === "c");
   if (i < 0) i = 0;
   select(i, { scroll: !cursor });
@@ -259,6 +295,7 @@ function select(i, { scroll = true } = {}) {
 function toggle(key, open = !openKeys.has(key)) {
   if (open) openKeys.add(key);
   else openKeys.delete(key);
+  if (key === "pinned" && !searching()) saveFlag("copypasta.pinnedClosed", (pinnedClosed = !open));
   saveExpanded();
   if (open && !lists.has(key)) loadPage(key).then(render);
   else render();
@@ -326,6 +363,16 @@ async function showClip(r) {
 
 function showGroup(g) {
   detailSeq++;
+  if (g.pinned) {
+    $detail.innerHTML = `
+    <div class="groupinfo">
+      <h2><span class="pin">★</span> Pinned</h2>
+      <p class="muted">${g.count} clip${g.count === 1 ? "" : "s"}${query ? " matching" : ""}</p>
+      <p>Clips you pinned, from every group. They also stay in their own group, at the top, and are never cleaned up with old history.</p>
+      <p class="muted small">Pin or unpin with <kbd>⌘P</kbd>, the ☆ on a row, or by dragging a clip onto this header · search <code>is:pinned</code> to filter</p>
+    </div>`;
+    return;
+  }
   const desc = g.id == null
     ? "Clips copied outside herdr that haven't been pasted into a workspace yet, plus anything you took out of a group."
     : g.workspace
@@ -435,8 +482,7 @@ async function act(what) {
       flash(String(err));
     }
   } else if (what === "pin") {
-    await call("pin", { id: r.id, pinned: !r.pinned });
-    refresh();
+    await togglePin(r);
   } else if (what === "delete") {
     await call("delete", { id: r.id });
     const next = entries[sel + 1]?.t === "c" ? entries[sel + 1] : entries[sel - 1];
@@ -452,6 +498,16 @@ async function act(what) {
     }
     await afterMove(r.id);
   }
+}
+
+async function togglePin(r) {
+  try {
+    await call("pin", { id: r.id, pinned: !r.pinned });
+  } catch (err) {
+    flash(String(err));
+  }
+  shownKey = null;
+  await refresh();
 }
 
 function flash(msg) {
@@ -532,6 +588,13 @@ document.addEventListener("keydown", (e) => {
 $list.addEventListener("click", (e) => {
   const li = e.target.closest("li[data-i]");
   if (!li) return;
+  const star = e.target.closest("[data-star]");
+  if (star) {
+    e.stopPropagation();
+    const ent = entries[Number(li.dataset.i)];
+    if (ent?.t === "c") togglePin(ent.row);
+    return;
+  }
   const i = Number(li.dataset.i);
   const ent = entries[i];
   if (ent?.t === "g" && (e.target.closest(".chev") || sel === i)) toggle(ent.key);
@@ -564,6 +627,12 @@ $list.addEventListener("drop", async (e) => {
   if (!li || !id) return;
   e.preventDefault();
   const key = li.dataset.key;
+  if (key === "pinned") {
+    await call("pin", { id, pinned: true }).catch((err) => flash(String(err)));
+    shownKey = null;
+    await refresh();
+    return;
+  }
   await call("move", { id, group: key === "none" ? null : Number(key) }).catch((err) => flash(String(err)));
   await afterMove(id);
 });

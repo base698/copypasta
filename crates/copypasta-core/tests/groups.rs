@@ -228,3 +228,36 @@ fn migrates_a_v1_database() {
     let s = Store::open_at(&dir).unwrap();
     assert_eq!(s.all_groups().unwrap().len(), 1);
 }
+
+#[test]
+fn pinned_clips_cross_groups_and_filter() {
+    let mut s = Store::open_at(&tempdir()).unwrap();
+    let (a, _) = s.record_copy(&text("cargo test -p api --lib limiter"), &pane("api", "w1:p1", None), 1).unwrap();
+    let (b, _) = s.record_copy(&text("kubectl rollout restart deploy/web"), &pane("web", "w2:p1", None), 2).unwrap();
+    let (c, _) = s.record_copy(&text("https://docs.rs/tokio/latest/tokio"), &chrome(), 3).unwrap();
+    s.set_pinned(a, true).unwrap();
+    api::call(&mut s, "pin", &json!({ "id": c })).unwrap();
+
+    // The pinned view spans groups (and ungrouped), newest first.
+    let pinned = s.query(&Query { group: GroupSel::Pinned, limit: 50, ..Default::default() }).unwrap();
+    assert_eq!(ids(&pinned), vec![c, a]);
+    let via_api = api::call(&mut s, "search", &json!({ "group": "pinned" })).unwrap();
+    assert_eq!(via_api.as_array().unwrap().len(), 2);
+
+    // is:pinned in a search, combined with text and group filters.
+    assert_eq!(ids(&s.search("is:pinned", 50).unwrap()), vec![c, a]);
+    assert_eq!(ids(&s.search("is:starred cargo", 50).unwrap()), vec![a]);
+    assert!(s.search("is:pinned g:web", 50).unwrap().is_empty());
+    let sums = s.group_summaries("is:pinned").unwrap();
+    assert_eq!(sums.iter().map(|g| g.count).sum::<i64>(), 2);
+
+    // Pinned sorts first within the full list; unpinning drops it out.
+    assert_eq!(s.search("", 50).unwrap()[0].clip.id, c);
+    s.set_pinned(c, false).unwrap();
+    assert_eq!(ids(&s.search("is:pinned", 50).unwrap()), vec![a]);
+    assert_eq!(ids(&s.search("", 50).unwrap()), vec![a, c, b]);
+
+    // Retention keeps pinned clips however old.
+    s.gc(1_000_000_000, 1, 1 << 30).unwrap();
+    assert_eq!(ids(&s.search("", 50).unwrap()), vec![a]);
+}

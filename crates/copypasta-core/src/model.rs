@@ -119,6 +119,8 @@ pub enum GroupSel {
     #[default]
     All,
     Ungrouped,
+    /// Pinned clips from every group.
+    Pinned,
     Id(i64),
 }
 

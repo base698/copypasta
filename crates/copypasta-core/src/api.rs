@@ -15,12 +15,14 @@ fn text<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// `null` / "all" → all, "none" → ungrouped, number → that group.
+/// `null` / "all" → all, "none" → ungrouped, "pinned" → pinned clips from
+/// every group, number → that group.
 fn group_sel(v: Option<&Value>) -> Result<GroupSel> {
     Ok(match v {
         None | Some(Value::Null) => GroupSel::All,
         Some(Value::String(s)) if s == "all" => GroupSel::All,
         Some(Value::String(s)) if s == "none" => GroupSel::Ungrouped,
+        Some(Value::String(s)) if s == "pinned" => GroupSel::Pinned,
         Some(v) => GroupSel::Id(v.as_i64().ok_or_else(|| anyhow!("bad group {v}"))?),
     })
 }
