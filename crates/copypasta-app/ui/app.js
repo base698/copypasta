@@ -24,6 +24,8 @@ let pinnedGroup = null;   // the "Pinned" section: pinned clips from every group
 let entries = [];         // visible rows: {t:"g", key, g} | {t:"c", key, row}
 let sel = 0;
 let cursor = null;        // {t, key, id?} — survives re-renders
+let picked = new Set();   // clip ids selected together (⌘-click, ⇧-click, ⇧↑↓)
+let anchor = null;        // clip id a ⇧ range starts from
 let query = "";
 let refreshSeq = 0;
 let searchTimer = null;
@@ -185,7 +187,7 @@ function clipRow(r, g, i) {
   }
   if (r.edit_of) cross += `<span class="chip edit" title="near-identical to clip #${r.edit_of}, with changes">edit of #${r.edit_of}</span>`;
   const mono = /[{};=<>]|^\s*(\$|git |cargo |npm )/.test(r.preview) && r.kind === "text";
-  return `<li class="clip${r.incoming ? " incoming" : ""}" data-i="${i}" data-id="${r.id}" draggable="true" role="option">
+  return `<li class="clip${r.incoming ? " incoming" : ""}${picked.has(r.id) ? " picked" : ""}" data-i="${i}" data-id="${r.id}" draggable="true" role="option">
     ${badge}
     <div class="body">
       <div class="preview${mono ? " mono" : ""}">${esc(r.preview)}</div>
@@ -212,6 +214,8 @@ function render() {
     else if (l && !l.rows.length && !g.pinned) html += `<li class="hint">${g.id == null ? "Nothing ungrouped." : "Empty. Drag clips here."}</li>`;
   }
   if (!groups.length) html = `<li class="hint">${query ? "No matches." : "No clips yet. Copy something."}</li>`;
+  const listed = new Set(entries.filter((e) => e.t === "c").map((e) => e.row.id));
+  picked = new Set([...picked].filter((id) => listed.has(id)));
   const top = $list.scrollTop;
   $list.innerHTML = html;
   $list.scrollTop = top;
@@ -276,12 +280,19 @@ function select(i, { scroll = true } = {}) {
   sel = Math.max(0, Math.min(entries.length - 1, i));
   const e = entries[sel];
   cursor = e.t === "g" ? { t: "g", key: e.key } : { t: "c", key: e.key, id: e.row.id };
-  $list.querySelectorAll("li[data-i]").forEach((li) => li.classList.toggle("sel", Number(li.dataset.i) === sel));
+  $list.querySelectorAll("li[data-i]").forEach((li) => {
+    li.classList.toggle("sel", Number(li.dataset.i) === sel);
+    if (li.dataset.id) li.classList.toggle("picked", picked.has(Number(li.dataset.id)));
+  });
   if (scroll) $list.querySelector("li.sel")?.scrollIntoView({ block: "nearest" });
-  const showKey = e.t === "g" ? `g:${e.key}:${e.g.count}:${e.g.name}` : `c:${e.row.id}:${e.row.group?.id}:${e.row.pinned}:${e.row.last_seen}`;
+  const many = multi() ? pickedRows() : null;
+  const showKey = many
+    ? `m:${many.map((r) => `${r.id}.${r.pinned}.${r.group?.id}`).join(",")}`
+    : e.t === "g" ? `g:${e.key}:${e.g.count}:${e.g.name}` : `c:${e.row.id}:${e.row.group?.id}:${e.row.pinned}:${e.row.last_seen}`;
   if (showKey !== shownKey) {
     shownKey = showKey;
-    if (e.t === "g") showGroup(e.g);
+    if (many) showMany(many);
+    else if (e.t === "g") showGroup(e.g);
     else showClip(e.row);
   }
   // Prefetch the next page as the cursor nears the end of a group.
@@ -290,6 +301,99 @@ function select(i, { scroll = true } = {}) {
     const idx = l?.rows.findIndex((r) => r.id === e.row.id) ?? -1;
     if (l && !l.done && !l.loading && idx >= l.rows.length - 5) loadPage(e.key).then(render);
   }
+}
+
+// ---- multiselect
+
+const multi = () => picked.size > 1;
+
+// Picked clips in list order, each once (a pinned clip is listed twice).
+function pickedRows() {
+  const seen = new Set();
+  const out = [];
+  for (const e of entries) {
+    if (e.t === "c" && picked.has(e.row.id) && !seen.has(e.row.id)) {
+      seen.add(e.row.id);
+      out.push(e.row);
+    }
+  }
+  return out;
+}
+
+// Move the cursor to entry i. "one" drops any multiselection, "toggle"
+// adds or removes that clip (⌘-click), "range" selects every clip from the
+// anchor to it (⇧-click, ⇧↑↓).
+function pick(i, how = "one", opts) {
+  const e = entries[Math.max(0, Math.min(entries.length - 1, i))];
+  const cur = entries[sel];
+  if (how === "toggle" && e?.t === "c") {
+    if (!picked.size && cur?.t === "c") picked.add(cur.row.id);
+    if (picked.has(e.row.id)) picked.delete(e.row.id);
+    else picked.add(e.row.id);
+    anchor = e.row.id;
+    if (picked.size === 1) {
+      // Down to one: that clip is the selection.
+      const only = [...picked][0];
+      picked.clear();
+      anchor = only;
+      i = entries.findIndex((x) => x.t === "c" && x.row.id === only);
+    }
+  } else if (how === "range") {
+    if (anchor == null) anchor = cur?.t === "c" ? cur.row.id : null;
+    const a = anchor == null ? i : Math.max(0, entries.findIndex((x) => x.t === "c" && x.row.id === anchor));
+    picked = new Set();
+    for (let k = Math.min(a, i); k <= Math.max(a, i); k++) if (entries[k]?.t === "c") picked.add(entries[k].row.id);
+    if (anchor == null && e?.t === "c") anchor = e.row.id;
+  } else {
+    picked.clear();
+    anchor = e?.t === "c" ? e.row.id : null;
+  }
+  if (picked.size === 1 && how !== "toggle") picked.clear();
+  shownKey = null;
+  select(i, opts);
+}
+
+function clearPicks() {
+  picked.clear();
+  shownKey = null;
+  select(sel);
+}
+
+function showMany(rows) {
+  detailSeq++;
+  const files = rows.some((r) => r.kind === "image" || r.kind === "file");
+  const allPinned = rows.every((r) => r.pinned);
+  const items = rows
+    .slice()
+    .sort((a, b) => a.first_seen - b.first_seen)
+    .map((r) => {
+      const badge = r.kind === "image" ? `<span class="kind" data-thumb="${r.id}">▣</span>` : `<span class="kind">${KIND_BADGE[r.kind] || "Aa"}</span>`;
+      return `<li data-open="${r.id}">${badge}<span class="preview">${esc(r.preview)}</span><span class="time">${ago(r.first_seen)}</span></li>`;
+    })
+    .join("");
+  let o = `<option value="" selected disabled>Choose…</option>`;
+  for (const g of allGroups) o += `<option value="${g.id}">${esc(g.name)}${g.workspace ? " · herdr" : ""}</option>`;
+  o += `<option value="none">No group</option><option value="new">New group…</option>`;
+  $detail.innerHTML = `
+    <div class="groupinfo">
+      <h2>${rows.length} clips selected</h2>
+      <ul class="picks">${items}</ul>
+    </div>
+    <div class="actions">
+      <button class="primary" data-act="copy">Copy ⏎</button>
+      <button data-act="paste">Paste ⌘⏎</button>
+      ${files ? '<button data-act="path" title="Paste the paths of the files instead of the files">Paste paths ⇧⌘⏎</button>' : ""}
+      <button data-act="pin">${allPinned ? "Unpin all" : "Pin all"}</button>
+      <button data-act="delete">Delete ${rows.length}</button>
+    </div>
+    <div class="actions grouprow">
+      <label>Move to <select id="grp" title="⌘G">${o}</select></label>
+      <span id="newgrp" hidden><input id="newname" placeholder="New group name" maxlength="80"><button data-act="create">Create</button></span>
+    </div>
+    <div class="groupinfo"><p class="muted small">Oldest first, as they'll paste.${files ? " Images and files paste as the files themselves, or as their paths in a terminal." : ""} Text goes one per line.</p>
+    <p class="muted small"><kbd>⌘</kbd>-click adds or removes a clip · <kbd>⇧</kbd>-click or <kbd>⇧</kbd><kbd>↑</kbd><kbd>↓</kbd> selects a range · <kbd>Esc</kbd> clears</p></div>`;
+  $detail.querySelectorAll("[data-thumb]").forEach(loadThumb);
+  document.getElementById("grp").addEventListener("change", onGroupChange);
 }
 
 function toggle(key, open = !openKeys.has(key)) {
@@ -397,13 +501,19 @@ function showGroup(g) {
 
 async function onGroupChange(ev) {
   const e = entries[sel];
-  if (e?.t !== "c") return;
   const v = ev.target.value;
   if (v === "new") {
     document.getElementById("newgrp").hidden = false;
     document.getElementById("newname").focus();
     return;
   }
+  if (multi()) {
+    const ids = pickedRows().map((r) => r.id);
+    await call("move", { ids, group: v === "none" ? null : Number(v) }).catch((err) => flash(String(err)));
+    await afterMove(e?.t === "c" && picked.has(e.row.id) ? e.row.id : ids[0]);
+    return;
+  }
+  if (e?.t !== "c") return;
   try {
     if (v === "auto") await call("reset_group", { id: e.row.id });
     else await call("move", { id: e.row.id, group: v === "none" ? null : Number(v) });
@@ -447,6 +557,7 @@ async function focusClip(id) {
 window.focusClip = focusClip;
 
 async function act(what) {
+  if (multi()) return actMany(what);
   const e = entries[sel];
   if (!e) return;
   if (e.t === "g") {
@@ -477,7 +588,7 @@ async function act(what) {
   if (what === "copy" || what === "paste" || what === "path") {
     try {
       // "path" pastes the clip's file path where it has one (images, files).
-      await invoke("restore", { id: r.id, paste: what !== "copy", asPath: what === "path" });
+      await invoke("restore", { ids: [r.id], paste: what !== "copy", asPath: what === "path" });
     } catch (err) {
       flash(String(err));
     }
@@ -497,6 +608,42 @@ async function act(what) {
       flash(String(err));
     }
     await afterMove(r.id);
+  }
+}
+
+async function actMany(what) {
+  const rows = pickedRows();
+  const ids = rows.map((r) => r.id);
+  if (what === "copy" || what === "paste" || what === "path") {
+    const order = rows.slice().sort((a, b) => a.first_seen - b.first_seen).map((r) => r.id);
+    try {
+      await invoke("restore", { ids: order, paste: what !== "copy", asPath: what === "path" });
+    } catch (err) {
+      flash(String(err));
+    }
+  } else if (what === "pin") {
+    const on = !rows.every((r) => r.pinned);
+    for (const id of ids) await call("pin", { id, pinned: on }).catch((err) => flash(String(err)));
+    shownKey = null;
+    await refresh();
+  } else if (what === "delete") {
+    const b = $detail.querySelector('[data-act="delete"]');
+    if (b && !b.dataset.armed) {
+      b.dataset.armed = "1";
+      b.textContent = `Click again to delete ${ids.length}`;
+      b.classList.add("danger");
+      return;
+    }
+    for (const id of ids) await call("delete", { id }).catch((err) => flash(String(err)));
+    const next = entries.slice(sel).find((x) => x.t === "c" && !picked.has(x.row.id)) ?? entries.slice(0, sel).reverse().find((x) => x.t === "c" && !picked.has(x.row.id));
+    cursor = next ? { t: "c", key: next.key, id: next.row.id } : null;
+    picked.clear();
+    refresh();
+  } else if (what === "create") {
+    const name = document.getElementById("newname").value.trim();
+    if (!name) return;
+    await call("create_group", { name, ids }).catch((err) => flash(String(err)));
+    await afterMove(ids[0]);
   }
 }
 
@@ -556,10 +703,11 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const cur = entries[sel];
-  if (e.key === "ArrowDown") { e.preventDefault(); select(sel + 1); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); select(sel - 1); }
-  else if (e.key === "PageDown") { e.preventDefault(); select(sel + 10); }
-  else if (e.key === "PageUp") { e.preventDefault(); select(sel - 10); }
+  const how = e.shiftKey ? "range" : "one";
+  if (e.key === "ArrowDown") { e.preventDefault(); pick(Math.min(entries.length - 1, sel + 1), how); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); pick(Math.max(0, sel - 1), how); }
+  else if (e.key === "PageDown") { e.preventDefault(); pick(Math.min(entries.length - 1, sel + 10), how); }
+  else if (e.key === "PageUp") { e.preventDefault(); pick(Math.max(0, sel - 10), how); }
   else if (e.key === "ArrowRight" && cur && ($q.value === "" || $q.selectionStart === $q.value.length)) {
     if (cur.t === "g") {
       e.preventDefault();
@@ -570,14 +718,15 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     if (cur.t === "c") {
       const gi = entries.findIndex((x) => x.t === "g" && x.key === cur.key);
-      if (gi >= 0) select(gi);
+      if (gi >= 0) pick(gi);
     } else if (openKeys.has(cur.key)) {
       toggle(cur.key, false);
     }
   } else if (e.key === "Enter") { e.preventDefault(); act(e.metaKey ? (e.shiftKey ? "path" : "paste") : "copy"); }
   else if (e.key === "Escape") {
     e.preventDefault();
-    if ($q.value) { $q.value = ""; refresh({ keep: false }); } else invoke("hide");
+    if (picked.size) clearPicks();
+    else if ($q.value) { $q.value = ""; refresh({ keep: false }); } else invoke("hide");
   }
   else if (e.metaKey && e.key.toLowerCase() === "p") { e.preventDefault(); act("pin"); }
   else if (e.metaKey && e.key.toLowerCase() === "g") { e.preventDefault(); document.getElementById("grp")?.focus(); }
@@ -597,19 +746,29 @@ $list.addEventListener("click", (e) => {
   }
   const i = Number(li.dataset.i);
   const ent = entries[i];
+  if (ent?.t === "c" && (e.metaKey || e.shiftKey)) {
+    pick(i, e.shiftKey ? "range" : "toggle");
+    return;
+  }
   if (ent?.t === "g" && (e.target.closest(".chev") || sel === i)) toggle(ent.key);
-  select(i);
+  pick(i);
+});
+// Keep ⇧-click from selecting text in the list.
+$list.addEventListener("mousedown", (e) => {
+  if (e.shiftKey) e.preventDefault();
 });
 $list.addEventListener("dblclick", (e) => {
   const li = e.target.closest("li.clip");
-  if (li) act("copy");
+  if (li && !e.metaKey && !e.shiftKey) act("copy");
 });
 
 // Drag clips onto group headers to move them.
 $list.addEventListener("dragstart", (e) => {
   const li = e.target.closest("li.clip");
   if (!li) return;
-  e.dataTransfer.setData("text/x-copypasta-clip", li.dataset.id);
+  const id = Number(li.dataset.id);
+  const ids = multi() && picked.has(id) ? pickedRows().map((r) => r.id) : [id];
+  e.dataTransfer.setData("text/x-copypasta-clip", ids.join(","));
   e.dataTransfer.effectAllowed = "move";
 });
 $list.addEventListener("dragover", (e) => {
@@ -622,24 +781,30 @@ $list.addEventListener("dragover", (e) => {
 $list.addEventListener("dragleave", (e) => e.target.closest?.("li.group")?.classList.remove("dropping"));
 $list.addEventListener("drop", async (e) => {
   const li = e.target.closest("li.group");
-  const id = Number(e.dataTransfer.getData("text/x-copypasta-clip"));
+  const ids = e.dataTransfer.getData("text/x-copypasta-clip").split(",").map(Number).filter(Boolean);
   $list.querySelectorAll(".dropping").forEach((x) => x.classList.remove("dropping"));
-  if (!li || !id) return;
+  if (!li || !ids.length) return;
   e.preventDefault();
   const key = li.dataset.key;
   if (key === "pinned") {
-    await call("pin", { id, pinned: true }).catch((err) => flash(String(err)));
+    for (const id of ids) await call("pin", { id, pinned: true }).catch((err) => flash(String(err)));
     shownKey = null;
     await refresh();
     return;
   }
-  await call("move", { id, group: key === "none" ? null : Number(key) }).catch((err) => flash(String(err)));
-  await afterMove(id);
+  await call("move", { ids, group: key === "none" ? null : Number(key) }).catch((err) => flash(String(err)));
+  await afterMove(ids[0]);
 });
 
 $detail.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-act]");
   if (b) act(b.dataset.act);
+  const open = e.target.closest("[data-open]");
+  if (open) {
+    picked.clear();
+    shownKey = null;
+    focusClip(Number(open.dataset.open));
+  }
 });
 
 let changeTimer = null;
@@ -648,6 +813,8 @@ T.event.listen("clips-changed", () => {
   changeTimer = setTimeout(() => refresh({ keep: true }), 150);
 });
 T.event.listen("panel-shown", () => {
+  picked.clear();
+  anchor = null;
   $q.focus();
   $q.select();
   cursor = null;

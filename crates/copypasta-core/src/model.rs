@@ -46,7 +46,7 @@ impl ClipKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Clip {
     pub id: i64,
     pub hash: String,

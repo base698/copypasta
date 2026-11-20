@@ -192,6 +192,30 @@ pub fn write_png(png: &[u8], url: Option<&str>) -> bool {
     ok
 }
 
+/// Put files on the pasteboard, one item each, as Finder's copy does (marked
+/// as ours): apps that take attachments get the files themselves.
+pub fn write_files(paths: &[std::path::PathBuf]) -> bool {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboardItem, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSURL};
+    let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
+        .iter()
+        .filter_map(|p| {
+            let url = NSURL::from_file_path(p)?.absoluteString()?;
+            let item = NSPasteboardItem::new();
+            item.setString_forType(&url, &ns("public.file-url"));
+            item.setString_forType(&ns("1"), &ns(MARKER));
+            Some(ProtocolObject::from_retained(item))
+        })
+        .collect();
+    if items.is_empty() {
+        return false;
+    }
+    let pb = general();
+    pb.clearContents();
+    pb.writeObjects(&NSArray::from_retained_slice(&items))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

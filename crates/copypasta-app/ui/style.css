@@ -88,6 +88,8 @@ main { flex: 1; display: grid; grid-template-columns: minmax(300px, 380px) 1fr; 
 }
 .list li.sel { background: var(--sel); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .list li:hover:not(.sel) { background: var(--raised); }
+.list li.clip.picked { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.list li.clip.picked.sel { background: var(--sel); border-color: var(--accent); }
 .list li.group {
   display: flex; align-items: center; gap: 8px; grid-template-columns: none;
   padding: 7px 10px; margin-top: 4px; font-weight: 600; font-size: 12.5px;
@@ -228,3 +230,10 @@ kbd {
   main { grid-template-columns: 1fr; grid-template-rows: 45% 55%; }
   .list { border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+/* Several clips selected */
+.picks { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 45vh; overflow-y: auto; }
+.picks li { display: grid; grid-template-columns: 28px 1fr auto; gap: 8px; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+.picks li:hover { background: var(--raised); }
+.picks .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 12.5px; }
+.picks .time { color: var(--muted); font-size: 11px; }

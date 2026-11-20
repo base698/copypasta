@@ -261,3 +261,27 @@ fn pinned_clips_cross_groups_and_filter() {
     s.gc(1_000_000_000, 1, 1 << 30).unwrap();
     assert_eq!(ids(&s.search("", 50).unwrap()), vec![a]);
 }
+
+#[test]
+fn files_that_arrived_together_follow_the_first_paste() {
+    let mut s = Store::open_at(&tempdir()).unwrap();
+    let file = |p: &str| Captured { kind: ClipKind::File, text: Some(p.into()), path: Some(p.into()), ..Default::default() };
+    let dl = Context { note: Some("Download".into()), ..Default::default() };
+    let (a, _) = s.record_copy(&file("/Users/me/Downloads/IMG_1.HEIC"), &dl, 1_000).unwrap();
+    let (b, _) = s.record_copy(&file("/Users/me/Downloads/IMG_2.HEIC"), &dl, 1_000).unwrap();
+    let (c, _) = s.record_copy(&file("/Users/me/Downloads/IMG_3.HEIC"), &dl, 30_000).unwrap();
+    // Too long after, another folder, or put somewhere by hand: left alone.
+    let (late, _) = s.record_copy(&file("/Users/me/Downloads/late.pdf"), &dl, 500_000).unwrap();
+    let (other, _) = s.record_copy(&file("/Users/me/Documents/x.png"), &dl, 1_000).unwrap();
+    let (nested, _) = s.record_copy(&file("/Users/me/Downloads/sub/y.png"), &dl, 1_000).unwrap();
+    let (mine, _) = s.record_copy(&file("/Users/me/Downloads/IMG_4.HEIC"), &dl, 2_000).unwrap();
+    s.move_clips(&[mine], None).unwrap();
+
+    s.record_paste(c, &pane("web", "w2:p1", Some("claude")), 40_000).unwrap();
+    for id in [a, b, c] {
+        assert_eq!(group_name(&s, id).as_deref(), Some("web"), "clip {id}");
+    }
+    for id in [late, other, nested, mine] {
+        assert_eq!(group_name(&s, id), None, "clip {id}");
+    }
+}

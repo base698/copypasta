@@ -22,8 +22,9 @@ pub enum Msg {
 
 #[derive(Default)]
 pub struct Shared {
-    /// Clip the panel just put back on the clipboard.
-    pub pending_restore: Mutex<Option<i64>>,
+    /// Clips the panel just put back on the clipboard (several when more
+    /// than one was selected).
+    pub pending_restore: Mutex<Option<Vec<i64>>>,
     pub paste_tracking: AtomicBool,
     /// Bundle id of the app that was in front when the panel opened: where
     /// a paste from the panel goes.
@@ -34,7 +35,9 @@ pub struct Capture {
     store: Store,
     shared: Arc<Shared>,
     last_change: isize,
-    current: Option<i64>,
+    /// What a ⌘V now pastes: usually one clip, several after the panel
+    /// put a selection back.
+    current: Vec<i64>,
     on_change: Box<dyn Fn() + Send>,
 }
 
@@ -45,10 +48,10 @@ impl Capture {
             Err(e) => eprintln!("copypasta: repair failed: {e:#}"),
             _ => {}
         }
-        let mut c = Capture { store, shared, last_change: platform::change_count(), current: None, on_change };
+        let mut c = Capture { store, shared, last_change: platform::change_count(), current: Vec::new(), on_change };
         // Whatever is on the clipboard at startup: remember it without a copy event.
         if let Some(cap) = platform::read().to_captured() {
-            c.current = c.store.upsert_clip(&cap, now_ms()).ok();
+            c.current = c.store.upsert_clip(&cap, now_ms()).ok().into_iter().collect();
         }
         c
     }
@@ -91,17 +94,17 @@ impl Capture {
             let pending = self.shared.pending_restore.lock().unwrap().take();
             let found = pending.or_else(|| {
                 let cap = snap.content()?;
-                self.store.clip_id_by_hash(&copypasta_core::db::clip_hash(&cap)).ok().flatten()
+                self.store.clip_id_by_hash(&copypasta_core::db::clip_hash(&cap)).ok().flatten().map(|id| vec![id])
             });
-            if found.is_some() {
-                self.current = found;
+            if let Some(ids) = found {
+                self.current = ids;
             }
             return;
         }
         let Some(cap) = snap.to_captured() else {
             // Concealed (password manager) or unsupported: pastes until the
             // next copy are of something we didn't record.
-            self.current = None;
+            self.current.clear();
             return;
         };
         let mut ctx = platform::current_context(snap.source_url.as_deref());
@@ -110,7 +113,7 @@ impl Capture {
         }
         if copypasta_core::secrets::is_password_manager(ctx.bundle_id.as_deref()) {
             // Not recorded; and a paste now is of something we don't know.
-            self.current = None;
+            self.current.clear();
             return;
         }
         if cap.kind == copypasta_core::ClipKind::Image && looks_like_screenshot(&snap.types) {
@@ -124,7 +127,7 @@ impl Capture {
         }
         match self.store.record_copy(&cap, &ctx, now_ms()) {
             Ok((clip, _)) => {
-                self.current = Some(clip);
+                self.current = vec![clip];
                 (self.on_change)();
             }
             Err(e) => eprintln!("copypasta: record copy failed: {e:#}"),
@@ -142,15 +145,19 @@ impl Capture {
     }
 
     fn on_paste(&mut self, ts: i64) {
-        let Some(clip) = self.current else { return };
+        if self.current.is_empty() {
+            return;
+        }
         let ctx = platform::current_context(None);
         if is_own(&ctx) {
             return;
         }
-        match self.store.record_paste(clip, &ctx, ts) {
-            Ok(_) => (self.on_change)(),
-            Err(e) => eprintln!("copypasta: record paste failed: {e:#}"),
+        for &clip in &self.current {
+            if let Err(e) = self.store.record_paste(clip, &ctx, ts) {
+                eprintln!("copypasta: record paste failed: {e:#}");
+            }
         }
+        (self.on_change)();
     }
 }
 

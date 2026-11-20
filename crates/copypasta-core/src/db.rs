@@ -245,6 +245,7 @@ impl Store {
             self.herdr_group(ws)?;
         }
         self.auto_group(clip_id)?;
+        self.group_batch(clip_id)?;
         Ok(id)
     }
 

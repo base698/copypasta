@@ -1,5 +1,5 @@
 use crate::AppState;
-use copypasta_core::ClipKind;
+use copypasta_core::{Clip, ClipKind};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -18,33 +18,48 @@ pub fn api(state: State<AppState>, cmd: String, args: Option<serde_json::Value>)
     copypasta_core::api::call(&mut store, &cmd, &args.unwrap_or(serde_json::Value::Null)).map_err(err)
 }
 
-/// Put a clip back on the clipboard; with `paste`, also paste it into the
+/// Put clips back on the clipboard; with `paste`, also paste them into the
 /// app that was in front before the panel opened. With `as_path`, a clip
 /// that has a file (a screenshot, any image, copied files) goes back as
 /// that file's path instead of its content.
+///
+/// Several clips go back together: images and files as the files
+/// themselves (as Finder copies them), or as their paths in a terminal or
+/// with `as_path`; anything with text as that text, one per line.
 #[tauri::command]
-pub fn restore(app: tauri::AppHandle, state: State<AppState>, id: i64, paste: bool, as_path: Option<bool>) -> Res<()> {
+pub fn restore(app: tauri::AppHandle, state: State<AppState>, ids: Vec<i64>, paste: bool, as_path: Option<bool>) -> Res<()> {
     let store = state.store.lock().unwrap();
-    let clip = store.clip(id).map_err(err)?.ok_or("clip not found")?;
-    if clip.secret {
-        return Err("secret clips are not stored and cannot be restored".into());
+    let mut clips = Vec::with_capacity(ids.len());
+    for &id in &ids {
+        let clip = store.clip(id).map_err(err)?.ok_or("clip not found")?;
+        if clip.secret {
+            return Err("secret clips are not stored and cannot be restored".into());
+        }
+        clips.push(clip);
     }
-    let files = if as_path.unwrap_or(false) { store.files(&clip) } else { Vec::new() };
-    *state.shared.pending_restore.lock().unwrap() = Some(id);
+    if clips.is_empty() {
+        return Err("nothing selected".into());
+    }
+    let terminal = state.shared.target_app.lock().unwrap().as_deref().is_some_and(is_terminal);
+    let as_path = as_path.unwrap_or(false);
+    let files: Vec<Vec<PathBuf>> = clips.iter().map(|c| store.files(c)).collect();
+    *state.shared.pending_restore.lock().unwrap() = Some(ids);
     #[cfg(target_os = "macos")]
     {
         use copypasta_core::pasteboard;
-        let ok = if !files.is_empty() {
-            let target = state.shared.target_app.lock().unwrap();
-            pasteboard::write_text(&paths_text(&files, target.as_deref().is_some_and(crate::mac::is_terminal)))
-        } else {
-            match clip.kind {
-                ClipKind::Image => match store.read_blob(&clip) {
+        let ok = if let [clip] = clips.as_slice() {
+            match (&files[0], clip.kind) {
+                (f, _) if as_path && !f.is_empty() => pasteboard::write_text(&paths_text(f, terminal)),
+                (_, ClipKind::Image) => match store.read_blob(clip) {
                     Some(png) => pasteboard::write_png(&png, clip.text.as_deref()),
                     None => false,
                 },
                 _ => pasteboard::write_text(clip.text.as_deref().unwrap_or("")),
             }
+        } else if !as_path && !terminal && files.iter().all(|f| !f.is_empty()) {
+            pasteboard::write_files(&files.concat())
+        } else {
+            pasteboard::write_text(&joined_text(&clips, &files, terminal))
         };
         if !ok {
             return Err("could not write to the clipboard".into());
@@ -73,6 +88,28 @@ fn paths_text(files: &[PathBuf], terminal: bool) -> String {
     } else {
         paths.collect::<Vec<_>>().join("\n")
     }
+}
+
+/// Several clips as one text: each clip's file paths where it has files,
+/// else its text. Only paths: on one line in a terminal, as dropping the
+/// files would type them; otherwise a line each.
+fn joined_text(clips: &[Clip], files: &[Vec<PathBuf>], terminal: bool) -> String {
+    let all_files = files.iter().all(|f| !f.is_empty());
+    let parts: Vec<String> = clips
+        .iter()
+        .zip(files)
+        .map(|(c, f)| if f.is_empty() { c.text.clone().unwrap_or_default() } else { paths_text(f, terminal) })
+        .collect();
+    parts.join(if all_files && terminal { " " } else { "\n" })
+}
+
+#[cfg(target_os = "macos")]
+fn is_terminal(bundle: &str) -> bool {
+    crate::mac::is_terminal(bundle)
+}
+#[cfg(not(target_os = "macos"))]
+fn is_terminal(_: &str) -> bool {
+    false
 }
 
 fn shell_quote(path: &str) -> String {
@@ -132,5 +169,17 @@ mod tests {
             "/Users/me/Documents/Screenshot\\ 2026-01-02\\ at\\ 3.04.05\u{202f}PM.png /tmp/it\\'s\\ \\(1\\).png"
         );
         assert_eq!(paths_text(&files, false), "/Users/me/Documents/Screenshot 2026-01-02 at 3.04.05\u{202f}PM.png\n/tmp/it's (1).png");
+    }
+
+    #[test]
+    fn several_clips_join_as_paths_or_lines() {
+        let text = |t: &str| Clip { text: Some(t.into()), ..Default::default() };
+        let shots = [text("a"), text("b")];
+        let files = [vec![PathBuf::from("/d/a b.png")], vec![PathBuf::from("/d/c.png")]];
+        assert_eq!(joined_text(&shots, &files, true), "/d/a\\ b.png /d/c.png");
+        assert_eq!(joined_text(&shots, &files, false), "/d/a b.png\n/d/c.png");
+        let mixed = [text("fix the bug"), text("x")];
+        let files = [vec![], vec![PathBuf::from("/d/c.png")]];
+        assert_eq!(joined_text(&mixed, &files, true), "fix the bug\n/d/c.png");
     }
 }

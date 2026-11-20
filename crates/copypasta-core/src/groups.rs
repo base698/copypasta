@@ -15,8 +15,12 @@ use crate::model::*;
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
+use std::path::Path;
 
 const HERDR_PREFIX: &str = "herdr:";
+/// Files that land in a folder no more than this far apart count as one
+/// batch (see `group_batch`).
+const BATCH_GAP_MS: i64 = 60_000;
 
 fn group_from_row(r: &rusqlite::Row) -> rusqlite::Result<Group> {
     let key: Option<String> = r.get(2)?;
@@ -74,6 +78,45 @@ impl Store {
         if let Some(g) = self.derived_group(clip_id)? {
             self.conn.execute("UPDATE clips SET group_id = ?2 WHERE id = ?1", params![clip_id, g])?;
         }
+        Ok(())
+    }
+
+    /// Files that arrived together (a few screenshots taken in a row, a batch
+    /// of downloads) go where the first of them is pasted: the ungrouped,
+    /// non-manual clips read from the same folder within `BATCH_GAP_MS` of
+    /// each other, in a chain through this one, join its group.
+    pub(crate) fn group_batch(&mut self, clip_id: i64) -> Result<()> {
+        let (gid, path): (Option<i64>, Option<String>) =
+            self.conn.query_row("SELECT group_id, path FROM clips WHERE id = ?1", [clip_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let (Some(gid), Some(path)) = (gid, path) else { return Ok(()) };
+        let Some(dir) = Path::new(&path).parent().map(Path::to_path_buf) else { return Ok(()) };
+        let like = dir.to_string_lossy().trim_end_matches('/').replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let files: Vec<(i64, String, i64, Option<i64>, i64)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, path, first_seen, group_id, group_manual FROM clips
+                 WHERE path LIKE ?1 ESCAPE '\\' ORDER BY first_seen, id",
+            )?;
+            let v = stmt
+                .query_map([format!("{like}/%")], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            v.into_iter().filter(|f| Path::new(&f.1).parent() == Some(dir.as_path())).collect()
+        };
+        let Some(at) = files.iter().position(|f| f.0 == clip_id) else { return Ok(()) };
+        let mut lo = at;
+        while lo > 0 && files[lo].2 - files[lo - 1].2 <= BATCH_GAP_MS {
+            lo -= 1;
+        }
+        let mut hi = at;
+        while hi + 1 < files.len() && files[hi + 1].2 - files[hi].2 <= BATCH_GAP_MS {
+            hi += 1;
+        }
+        let tx = self.conn.transaction()?;
+        for f in &files[lo..=hi] {
+            if f.3.is_none() && f.4 == 0 {
+                tx.execute("UPDATE clips SET group_id = ?2 WHERE id = ?1", params![f.0, gid])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
